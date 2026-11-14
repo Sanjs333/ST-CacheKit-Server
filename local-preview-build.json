@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "distribution": "Prompt-Cache-Optimization-local-preview",
+  "previewVersion": "1.0.0",
+  "basedOnUpstreamVersion": "0.6.1-pre1",
+  "allowUpstreamUpdates": false
+}
