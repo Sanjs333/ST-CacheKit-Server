@@ -2,6 +2,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createInterface } = require('node:readline');
+const { setImmediate: yieldToServer } = require('node:timers/promises');
 const { randomUUID, randomBytes, createHmac } = require('node:crypto');
 const { summarizeGoogleRequest, MAX_STORED_GOOGLE_REQUESTS } = require('./google-request-preview.cjs');
 
@@ -87,24 +89,92 @@ class UsageStore {
         this.activeIds = new Set();
         this.recoveredFiles = new Set();
         this.indexes = new Map();
+        this.chatIndexes = new Map();
+        this.pendingRecords = new Map();
+        this.loading = new Map();
+        this.readyDirectories = new Set();
         this.#previewKey = randomBytes(32);
         this.#previewEpoch = randomUUID();
     }
 
     #append(file, record) {
-        this.fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-        this.fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+        this.#appendBatch(file, [record]);
+    }
+
+    #appendBatch(file, records) {
+        const directory = path.dirname(file);
+        if (!this.readyDirectories.has(directory)) {
+            this.fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+            this.readyDirectories.add(directory);
+        }
+        this.fs.appendFileSync(file, records.map(record => `${JSON.stringify(record)}\n`).join(''), { encoding: 'utf8', mode: 0o600 });
+    }
+
+    #index(file, record) {
+        let records = this.indexes.get(file);
+        if (!records) { records = new Map(); this.indexes.set(file, records); }
+        let chats = this.chatIndexes.get(file);
+        if (!chats) { chats = new Map(); this.chatIndexes.set(file, chats); }
+        let pending = this.pendingRecords.get(file);
+        if (!pending) { pending = new Map(); this.pendingRecords.set(file, pending); }
+        const previous = records.get(record.id);
+        if (previous && previous.chatId !== record.chatId) {
+            const oldChat = chats.get(previous.chatId);
+            oldChat.records.splice(oldChat.positions.get(record.id), 1);
+            oldChat.positions = new Map(oldChat.records.map((value, index) => [value.id, index]));
+        }
+        let chat = chats.get(record.chatId);
+        if (!chat) { chat = { records: [], positions: new Map() }; chats.set(record.chatId, chat); }
+        const position = chat.positions.get(record.id) ?? chat.records.length;
+        chat.records[position] = record; chat.positions.set(record.id, position);
+        records.set(record.id, record);
+        if (record.status === 'pending') pending.set(record.id, record);
+        else pending.delete(record.id);
+    }
+
+    // Production routes await this once per user. Stream large ledgers instead
+    // of reading/splitting/parsing the whole file on the host's event loop.
+    async ensureLoaded(user) {
+        const file = ledgerPathForUser(user);
+        if (!file) return;
+        if (this.loading.has(file)) return this.loading.get(file);
+        if (this.indexes.has(file)) return;
+        const task = (async () => {
+            const records = new Map();
+            try {
+                const input = this.fs.createReadStream(file, { encoding: 'utf8' });
+                const lines = createInterface({ input, crlfDelay: Infinity });
+                let count = 0;
+                try {
+                    for await (const line of lines) {
+                        try { const record = JSON.parse(line); if (record && typeof record.id === 'string') records.set(record.id, record); }
+                        catch { /* A partial final JSONL row does not erase earlier usage. */ }
+                        if (++count % 1000 === 0) await yieldToServer();
+                    }
+                } finally { lines.close(); input.destroy(); }
+            } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+            // Publish only a complete index. Concurrent routes share the load.
+            if (this.indexes.has(file)) return;
+            this.indexes.set(file, new Map());
+            let count = 0;
+            for (const record of records.values()) {
+                this.#index(file, record);
+                if (++count % 1000 === 0) await yieldToServer();
+            }
+        })();
+        this.loading.set(file, task);
+        try { await task; } finally { if (this.loading.get(file) === task) this.loading.delete(file); }
     }
 
     #read(file) {
         const cached = this.indexes.get(file);
-        if (cached) return [...cached.values()];
+        if (cached) return cached;
         let text;
         try { text = this.fs.readFileSync(file, 'utf8'); }
         catch (error) {
             if (error?.code === 'ENOENT') {
                 this.indexes.set(file, new Map());
-                return [];
+                return this.indexes.get(file);
             }
             throw error;
         }
@@ -116,46 +186,53 @@ class UsageStore {
                 if (record && typeof record.id === 'string') records.set(record.id, record);
             } catch {                                                                 }
         }
-        this.indexes.set(file, records);
-        return [...records.values()];
+        for (const record of records.values()) this.#index(file, record);
+        if (!this.indexes.has(file)) this.indexes.set(file, new Map());
+        return this.indexes.get(file);
     }
 
-    #recover(file, records) {
+    #recover(file) {
+        this.#read(file);
         const firstAccess = !this.recoveredFiles.has(file);
-        this.recoveredFiles.add(file);
         const cutoff = this.now() - this.pendingTimeoutMs;
-        for (const record of records) {
+        let batch = [];
+        const flush = () => {
+            if (!batch.length) return;
+            this.#appendBatch(file, batch);
+            for (const record of batch) { this.#index(file, record); this.activeIds.delete(record.id); }
+            batch = [];
+        };
+        for (const record of this.pendingRecords.get(file)?.values() ?? []) {
             if (record.status === 'pending' && (firstAccess && !this.activeIds.has(record.id)
                 || this.activeIds.has(record.id) && Date.parse(record.createdAt) <= cutoff)) {
                 const timedOut = this.activeIds.has(record.id);
                 const recovered = { ...record, status: 'incomplete', errorCode: timedOut ? 'USAGE_CAPTURE_TIMEOUT' : 'PROCESS_RESTARTED' };
-                this.#append(file, recovered);
-                Object.assign(record, recovered);
-                this.indexes.get(file)?.set(record.id, recovered);
-                this.activeIds.delete(record.id);
+                batch.push(recovered);
+                if (batch.length >= 1000) flush();
             }
         }
-        return records;
+        flush(); this.recoveredFiles.add(file);
     }
 
     create(user, details) {
         const file = ledgerPathForUser(user);
         if (!file || !details.chatId) return null;
-        this.#recover(file, this.#read(file));
+        this.#recover(file);
         const record = {
             id: randomUUID(), chatId: details.chatId, createdAt: new Date(this.now()).toISOString(),
             model: details.model, source: details.source, tier: details.tier, region: details.region,
             stream: details.stream, status: 'pending', usage: null, price: clone(details.price),
         };
         this.#append(file, record);
-        this.indexes.get(file)?.set(record.id, record);
+        this.#index(file, record);
         this.activeIds.add(record.id);
         return { file, id: record.id, record: clone(record) };
     }
 
     update(reference, patch) {
         if (!reference?.file || !reference?.id) return;
-        const record = this.#recover(reference.file, this.#read(reference.file)).find(candidate => candidate.id === reference.id);
+        this.#recover(reference.file);
+        const record = this.indexes.get(reference.file)?.get(reference.id);
         if (!record || record.status !== 'pending' || !this.activeIds.has(record.id)) return;
         const updated = { ...record };
         if (patch.usage !== undefined) updated.usage = clone(patch.usage);
@@ -163,13 +240,13 @@ class UsageStore {
         if (patch.errorCode) updated.errorCode = patch.errorCode;
         else if (patch.status === 'complete') delete updated.errorCode;
         this.#append(reference.file, updated);
-        this.indexes.get(reference.file)?.set(updated.id, updated);
+        this.#index(reference.file, updated);
         if (updated.status !== 'pending') this.activeIds.delete(updated.id);
     }
 
     captureGoogleRequest(reference, bytes, options, worldInfoOrder) {
         if (!reference?.file || !reference?.id) return;
-        const record = this.#read(reference.file).find(candidate => candidate.id === reference.id);
+        const record = this.#read(reference.file).get(reference.id);
         if (!record) return;
         // Per-process, per-user keyed digests cannot be used as public prompt
         // hashes. Only projections are persisted; raw bytes never leave here.
@@ -191,33 +268,50 @@ class UsageStore {
         // A fast upstream can complete before a request tap flushes. Preserve
         // terminal usage/status rather than reviving or overwriting the record.
         this.#append(reference.file, updated);
-        this.indexes.get(reference.file)?.set(updated.id, updated);
+        this.#index(reference.file, updated);
     }
 
     listLatest(user, chatId, limit = 12) {
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) return null;
         const file = ledgerPathForUser(user);
         if (!file) return null;
-        const records = this.#recover(file, this.#read(file)).filter(record => record.chatId === chatId).slice(-limit);
+        this.#recover(file);
+        const records = (this.chatIndexes.get(file)?.get(chatId)?.records ?? []).slice(-limit);
         return { records: clone(records) };
+    }
+
+    listByIds(user, chatId, ids, { includeRequestPreviews = false } = {}) {
+        const file = ledgerPathForUser(user);
+        if (!file) return null;
+        this.#recover(file);
+        const index = this.indexes.get(file), records = [];
+        for (const id of ids) {
+            const record = index.get(id);
+            if (!record || record.chatId !== chatId) continue;
+            if (includeRequestPreviews) records.push(record);
+            else { const { googleRequests, googleRequestCount, ...costRecord } = record; records.push(costRecord); }
+        }
+        return { records: clone(records), lookup: true };
     }
 
     list(user, chatId, options = undefined) {
         const file = ledgerPathForUser(user);
         if (!file) return null;
-        const all = this.#recover(file, this.#read(file)).filter(record => record.chatId === chatId);
+        this.#recover(file);
+        const all = this.chatIndexes.get(file)?.get(chatId)?.records ?? [];
         if (options === undefined) return clone(all);
         const { cursor, limit } = options;
         const pageSize = parseLimit(limit);
         const position = decodeCursor(cursor);
         if (pageSize === null || !position) return null;
         const snapshot = position.snapshot === undefined ? all.length : Math.min(position.snapshot, all.length);
-        const records = all.slice(0, snapshot);
-        const page = records.slice(position.offset, position.offset + pageSize);
+        const page = all.slice(position.offset, Math.min(position.offset + pageSize, snapshot));
         const nextOffset = position.offset + page.length;
-        const truncated = nextOffset < records.length;
+        const truncated = nextOffset < snapshot;
         return {
-            records: clone(page),
+            records: clone(options.includeRequestPreviews === false ? page.map(record => {
+                const { googleRequests, googleRequestCount, ...costRecord } = record; return costRecord;
+            }) : page),
             ...(truncated ? { nextCursor: encodeCursor(nextOffset, snapshot), truncated: true } : {}),
         };
     }

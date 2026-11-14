@@ -4,7 +4,7 @@ const { PluginError, sendExpressError } = require('./errors.cjs');
 const { validateChatId } = require('./protocol.cjs');
 
 function createUsageHandler({ usageStore }) {
-    return function usageHandler(request, response) {
+    return async function usageHandler(request, response) {
         try {
             if (!request.user?.directories?.root) {
                 throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录 SillyTavern 用户账号。');
@@ -14,6 +14,16 @@ function createUsageHandler({ usageStore }) {
             const previewFlag = request.query?.includeRequestPreviews;
             if (previewFlag !== undefined && !['0', '1'].includes(previewFlag)) throw new PluginError(400, 'INVALID_USAGE_PAGE', '请求结构预览的选择参数无效。');
             const includePreviews = previewFlag === '1';
+            const idsRaw = request.query?.ids;
+            let ids;
+            if (idsRaw !== undefined) {
+                if (typeof idsRaw !== 'string' || idsRaw.length > 12899) throw new PluginError(400, 'INVALID_USAGE_PAGE', '用量记录 ID 无效。');
+                ids = [...new Set(idsRaw.split(','))];
+                if (!ids.length || ids.length > 100 || ids.some(id => !/^[A-Za-z0-9_-]{1,128}$/.test(id))
+                    || ['cursor', 'limit', 'latest'].some(key => request.query?.[key] !== undefined)) {
+                    throw new PluginError(400, 'INVALID_USAGE_PAGE', '用量记录 ID 或分页参数无效。');
+                }
+            }
             const latestRaw = request.query?.latest;
             let latest;
             if (latestRaw !== undefined) {
@@ -22,9 +32,13 @@ function createUsageHandler({ usageStore }) {
                 latest = Number(latestRaw);
                 if (typeof usageStore.listLatest !== 'function') throw new PluginError(409, 'REQUEST_PREVIEW_FEATURE_UNAVAILABLE', '当前后端不支持读取指定数量的最近请求预览，请更新后端。');
             }
-            const page = latest !== undefined ? usageStore.listLatest(request.user, chatId, latest) : usageStore.list(request.user, chatId, {
+            await usageStore.ensureLoaded?.(request.user);
+            const page = ids && typeof usageStore.listByIds === 'function'
+                ? usageStore.listByIds(request.user, chatId, ids, { includeRequestPreviews: includePreviews })
+                : latest !== undefined ? usageStore.listLatest(request.user, chatId, latest) : usageStore.list(request.user, chatId, {
                 cursor: request.query?.cursor,
                 limit: request.query?.limit,
+                includeRequestPreviews: includePreviews,
             });
             if (!page) throw new PluginError(400, 'INVALID_USAGE_PAGE', '用量记录的分页游标或数量限制无效。');
             const records = includePreviews ? page.records : page.records.map(record => {

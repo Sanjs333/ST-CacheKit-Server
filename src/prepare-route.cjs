@@ -131,7 +131,8 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
 
             if (config.usageChatId) {
                 try {
-                    usageReference = usageStore?.create(request.user, {
+                    await usageStore?.ensureLoaded?.(request.user);
+                    if (!request.aborted && !response.destroyed) usageReference = usageStore?.create(request.user, {
                         chatId: config.usageChatId,
                         model: config.model,
                         source: config.source,
@@ -143,6 +144,11 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 } catch (error) {
                     logStore?.server('error', 'usage_ledger_create_failed', prepareLogContext(config, startedAt, describeError(error)), { priority: 'low' });
                 }
+            }
+            if (request.aborted || response.destroyed) {
+                ticketStore.release(reservation); reservation = undefined;
+                try { if (promptInspectorReference) promptInspectorStore?.failGoogleTicket(promptInspectorReference, 'CLIENT_DISCONNECTED'); } catch {}
+                return undefined;
             }
             const issued = ticketStore.commit(reservation, {
                 targetUrl,
@@ -171,6 +177,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 nativeGemini4: true,
                 nativeGemini4Models: [...GEMINI4_MODELS],
                 worldInfoOrderReceipts: typeof usageStore?.captureGoogleRequest === 'function',
+                usageLookup: typeof usageStore?.listByIds === 'function',
                 nativeGeminiApiVersion: config.source === 'makersuite'
                     ? new URL(targetUrl).pathname.match(/\/(v1(?:beta|alpha)?)\/models\/[^/]+$/u)[1]
                     : new URL(targetUrl).pathname.split('/')[1],

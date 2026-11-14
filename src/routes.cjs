@@ -70,6 +70,7 @@ function registerRoutes(router, dependencies) {
                 logs: isAdmin,
                 clientLogging: isAdmin,
                 usage: true,
+                usageLookup: typeof dependencies.usageStore?.listByIds === 'function',
                 promptInspector: dependencies.promptInspectorStore?.capabilities() ?? { version: 1, available: false,
                     api: false, nativeWire: false, nativeRelay: false, googleWire: false, requiresHostPatch: false,
                     pluginWireSources: [], supportedSources: [], sourceTrace: 'frontend-supplied', privacyMode: 'memory-only' },
