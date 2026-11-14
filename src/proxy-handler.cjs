@@ -40,7 +40,7 @@ class ByteLimitTransform extends Transform {
     _transform(chunk, encoding, callback) {
         this.total += chunk.length;
         if (this.total > this.limit) {
-            callback(new PluginError(413, 'REQUEST_BODY_TOO_LARGE', 'The proxied Vertex AI request body is too large.'));
+            callback(new PluginError(413, 'REQUEST_BODY_TOO_LARGE', '转发给 Vertex AI 的请求内容超过大小上限。'));
             return;
         }
         callback(null, chunk);
@@ -73,7 +73,7 @@ class FlexBodyTransform extends ByteLimitTransform {
             body.service_tier = 'flex';
             callback(null, JSON.stringify(body));
         } catch {
-            callback(new PluginError(400, 'INVALID_GOOGLE_BODY', 'The Google AI Studio request must be a JSON object.'));
+            callback(new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google AI Studio 请求内容必须是 JSON 对象。'));
         }
     }
 
@@ -85,7 +85,7 @@ class FlexBodyTransform extends ByteLimitTransform {
 
 function getBearerSecret(header) {
     if (typeof header !== 'string' || !header.startsWith('Bearer ') || header.length <= 7) {
-        throw new PluginError(401, 'INVALID_PROXY_SECRET', 'The proxy credential is invalid.');
+        throw new PluginError(401, 'INVALID_PROXY_SECRET', '代理凭证无效。');
     }
     return header.slice(7);
 }
@@ -95,12 +95,12 @@ function parseProxyPath(requestUrl) {
     try {
         parsed = new URL(requestUrl, 'http://127.0.0.1');
     } catch {
-        throw new PluginError(404, 'INVALID_PROXY_PATH', 'The proxy path is invalid.');
+        throw new PluginError(404, 'INVALID_PROXY_PATH', '代理请求路径无效。');
     }
 
     const match = /^\/proxy\/([A-Za-z0-9_-]+)\/(v1\/publishers\/google|v1(?:beta|alpha)?)\/models\/([^/]+)$/u.exec(parsed.pathname);
     if (!match) {
-        throw new PluginError(404, 'INVALID_PROXY_PATH', 'The proxy path is invalid.');
+        throw new PluginError(404, 'INVALID_PROXY_PATH', '代理请求路径无效。');
     }
 
     try {
@@ -109,31 +109,31 @@ function parseProxyPath(requestUrl) {
             source: match[2] === 'v1/publishers/google' ? 'vertexai' : 'makersuite',
         };
     } catch {
-        throw new PluginError(404, 'INVALID_PROXY_PATH', 'The proxy path is invalid.');
+        throw new PluginError(404, 'INVALID_PROXY_PATH', '代理请求路径无效。');
     }
 }
 
 function validateSuffix(parsed, modelAction, ticketData) {
     if (modelAction !== `${ticketData.model}:${ticketData.endpoint}`) {
-        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', 'The proxy request does not match its ticket.');
+        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', '代理请求与其凭证不匹配。');
     }
     const aiStudio = ticketData.source === 'makersuite';
     const expectedSuffix = aiStudio ? new URL(ticketData.targetUrl).pathname.match(/\/v1(?:beta|alpha)?\/models\/[^/]+$/u)?.[0]
         : `/v1/publishers/google/models/${ticketData.model}:${ticketData.endpoint}`;
     if (!expectedSuffix || !parsed.pathname.endsWith(expectedSuffix)) {
-        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', 'The proxy provider or API version does not match its ticket.');
+        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', '代理服务来源或 API 版本与其凭证不匹配。');
     }
     const keys = parsed.searchParams.getAll('key');
     if (keys.length > (aiStudio ? 1 : 0)) {
-        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', 'The proxy credential query does not match its ticket.');
+        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', '代理请求中的凭证参数与其签发记录不匹配。');
     }
     const queryEntries = [...parsed.searchParams.entries()].filter(([name]) => !(aiStudio && name === 'key'));
     if (ticketData.stream) {
         if (queryEntries.length !== 1 || queryEntries[0][0] !== 'alt' || queryEntries[0][1] !== 'sse') {
-            throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', 'The streaming proxy request does not match its ticket.');
+            throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', '流式代理请求与其凭证不匹配。');
         }
     } else if (queryEntries.length !== 0) {
-        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', 'The proxy request does not match its ticket.');
+        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', '代理请求与其凭证不匹配。');
     }
 }
 
@@ -221,15 +221,15 @@ function createProxyHandler({
         logStore?.server('info', 'proxy_request_received', undefined, { priority: 'low' });
         try {
             if (request.method !== 'POST') {
-                throw new PluginError(405, 'METHOD_NOT_ALLOWED', 'Only POST is accepted by the loopback proxy.');
+                throw new PluginError(405, 'METHOD_NOT_ALLOWED', '本地回环代理仅支持 POST 请求。');
             }
             const contentType = request.headers['content-type'];
             if (typeof contentType !== 'string' || !/^application\/json(?:\s*;|$)/iu.test(contentType)) {
-                throw new PluginError(415, 'JSON_REQUIRED', 'The loopback proxy accepts JSON request bodies only.');
+                throw new PluginError(415, 'JSON_REQUIRED', '本地回环代理仅支持 JSON 请求内容。');
             }
             const declaredLength = Number(request.headers['content-length']);
             if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
-                throw new PluginError(413, 'REQUEST_BODY_TOO_LARGE', 'The proxied Vertex AI request body is too large.');
+                throw new PluginError(413, 'REQUEST_BODY_TOO_LARGE', '转发给 Vertex AI 的请求内容超过大小上限。');
             }
 
             const { parsed, ticket, modelAction, source } = parseProxyPath(request.url);
@@ -243,7 +243,7 @@ function createProxyHandler({
                 proxySecret,
                 data => {
                     if (source !== (data.source || 'vertexai')) {
-                        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', 'The proxy provider does not match its ticket.');
+                        throw new PluginError(409, 'PROXY_REQUEST_MISMATCH', '代理服务来源与其凭证不匹配。');
                     }
                     validateSuffix(parsed, modelAction, data);
                 },
@@ -308,7 +308,7 @@ function createProxyHandler({
                     // Relaying Location would let SillyTavern's outer node-fetch follow
                     // the redirect after it leaves this allowlisted transport.
                     upstreamResponse.destroy();
-                    fail(new PluginError(502, 'VERTEX_REDIRECT_REJECTED', 'The Vertex AI upstream returned a redirect, which was not followed.'));
+                    fail(new PluginError(502, 'VERTEX_REDIRECT_REJECTED', 'Vertex AI 上游返回了重定向，当前传输不支持跟随重定向。'));
                     return;
                 }
                 const responseHeaders = copyUpstreamHeaders(upstreamResponse.headers);
@@ -349,7 +349,7 @@ function createProxyHandler({
             });
             logStore?.server('info', 'proxy_forward_started', makeLogContext());
             upstream.setTimeout?.(upstreamTimeoutMs, () => {
-                fail(new PluginError(504, 'VERTEX_UPSTREAM_TIMEOUT', 'The Vertex AI upstream request timed out.'));
+                fail(new PluginError(504, 'VERTEX_UPSTREAM_TIMEOUT', 'Vertex AI 上游请求超时，请稍后重试或检查网络与代理连接。'));
             });
 
             bodyStream = ticketData.source === 'makersuite' && ticketData.tier === 'flex'
@@ -358,7 +358,7 @@ function createProxyHandler({
             upstream.on('error', error => {
                 fail(error instanceof PluginError
                     ? error
-                    : new PluginError(502, 'VERTEX_UPSTREAM_FAILED', 'The Vertex AI upstream connection failed.', { cause: error }));
+                    : new PluginError(502, 'VERTEX_UPSTREAM_FAILED', 'Vertex AI 上游连接失败，请检查网络与代理连接。', { cause: error }));
             });
             request.once('aborted', () => {
                 if (clientGone) return;
@@ -372,7 +372,7 @@ function createProxyHandler({
                 inspectorTap?.destroy();
             });
             request.once('error', error => {
-                fail(new PluginError(400, 'PROXY_REQUEST_STREAM_FAILED', 'The loopback request stream failed.', { cause: error }));
+                fail(new PluginError(400, 'PROXY_REQUEST_STREAM_FAILED', '本地回环请求的数据流读取失败。', { cause: error }));
             });
             response.once('close', () => {
                 if (!response.writableEnded) {

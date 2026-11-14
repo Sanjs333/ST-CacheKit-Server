@@ -20,7 +20,7 @@ function createLoopbackTransport({ ticketStore, logStore, usageStore, promptInsp
 
     return {
         async start() {
-            if (server) throw new Error('Loopback transport is already running.');
+            if (server) throw new Error('本地回环传输服务已在运行。');
             logStore?.server('info', 'loopback_starting');
             try {
                 server = http.createServer((request, response) => {
@@ -47,7 +47,7 @@ function createLoopbackTransport({ ticketStore, logStore, usageStore, promptInsp
                 const address = server.address();
                 if (!address || typeof address === 'string' || address.address !== '127.0.0.1') {
                     await this.close();
-                    throw new PluginError(500, 'LOOPBACK_BIND_FAILED', 'The private loopback proxy could not be started.');
+                    throw new PluginError(500, 'LOOPBACK_BIND_FAILED', '无法启动本地回环代理。');
                 }
                 baseUrl = `http://127.0.0.1:${address.port}`;
                 logStore?.server('info', 'loopback_started');
@@ -58,7 +58,7 @@ function createLoopbackTransport({ ticketStore, logStore, usageStore, promptInsp
         },
 
         get baseUrl() {
-            if (!baseUrl) throw new PluginError(503, 'LOOPBACK_NOT_READY', 'The private loopback proxy is not ready.');
+            if (!baseUrl) throw new PluginError(503, 'LOOPBACK_NOT_READY', '本地回环代理尚未就绪。');
             return baseUrl;
         },
 

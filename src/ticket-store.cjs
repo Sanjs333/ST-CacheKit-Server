@@ -59,10 +59,10 @@ class TicketStore {
         const normalizedOwnerKey = normalizeOwnerKey(ownerKey);
         const ownedCount = this.userEntries.get(normalizedOwnerKey) || 0;
         if (this.entries.size + this.reservations.size >= this.maxEntries) {
-            throw new PluginError(503, 'TICKET_CAPACITY_EXCEEDED', 'The proxy ticket capacity is temporarily exhausted.');
+            throw new PluginError(503, 'TICKET_CAPACITY_EXCEEDED', '代理凭证暂时达到容量上限，请稍后重试。');
         }
         if (ownedCount >= this.maxEntriesPerUser) {
-            throw new PluginError(429, 'USER_TICKET_CAPACITY_EXCEEDED', 'This user has too many pending proxy tickets.');
+            throw new PluginError(429, 'USER_TICKET_CAPACITY_EXCEEDED', '当前用户待处理的代理凭证过多，请稍后重试。');
         }
 
         const currentTime = this.now();
@@ -70,7 +70,7 @@ class TicketStore {
             .filter(timestamp => timestamp > currentTime - this.issueWindowMs);
         if (recentIssues.length >= this.maxIssuesPerWindow) {
             this.issueTimes.set(normalizedOwnerKey, recentIssues);
-            throw new PluginError(429, 'TICKET_ISSUE_RATE_EXCEEDED', 'Proxy ticket issuance is temporarily rate limited.');
+            throw new PluginError(429, 'TICKET_ISSUE_RATE_EXCEEDED', '代理凭证签发过于频繁，请稍后重试。');
         }
         recentIssues.push(currentTime);
         this.issueTimes.set(normalizedOwnerKey, recentIssues);
@@ -87,11 +87,11 @@ class TicketStore {
     commit(reservation, data) {
         const storedReservation = this.reservations.get(reservation);
         if (!storedReservation) {
-            throw new PluginError(409, 'TICKET_RESERVATION_INVALID', 'The proxy ticket reservation is invalid or has expired.');
+            throw new PluginError(409, 'TICKET_RESERVATION_INVALID', '代理凭证预留记录无效或已过期。');
         }
         if (storedReservation.expiresAt <= this.now()) {
             this.release(reservation);
-            throw new PluginError(409, 'TICKET_RESERVATION_EXPIRED', 'The proxy ticket reservation has expired.');
+            throw new PluginError(409, 'TICKET_RESERVATION_EXPIRED', '代理凭证预留记录已过期。');
         }
 
         let ticket;
@@ -101,7 +101,7 @@ class TicketStore {
             ticket = undefined;
         }
         if (!ticket) {
-            throw new PluginError(503, 'TICKET_GENERATION_FAILED', 'Could not allocate a proxy ticket.');
+            throw new PluginError(503, 'TICKET_GENERATION_FAILED', '无法签发代理凭证。');
         }
 
         const proxySecret = this.randomBytes(32).toString('base64url');
@@ -127,21 +127,21 @@ class TicketStore {
     consume(ticket, suppliedSecret, validator = undefined) {
         const entry = this.entries.get(ticket);
         if (!entry) {
-            throw new PluginError(404, 'INVALID_PROXY_TICKET', 'The proxy ticket is invalid or has already been used.');
+            throw new PluginError(404, 'INVALID_PROXY_TICKET', '代理凭证无效或已被使用。');
         }
         if (entry.expiresAt <= this.now()) {
             this.entries.delete(ticket);
             this.#decrementUser(entry.ownerKey);
-            throw new PluginError(410, 'EXPIRED_PROXY_TICKET', 'The proxy ticket has expired.');
+            throw new PluginError(410, 'EXPIRED_PROXY_TICKET', '代理凭证已过期，请重新发起请求。');
         }
         if (typeof suppliedSecret !== 'string') {
-            throw new PluginError(401, 'INVALID_PROXY_SECRET', 'The proxy credential is invalid.');
+            throw new PluginError(401, 'INVALID_PROXY_SECRET', '代理凭证无效。');
         }
 
         const expected = Buffer.from(entry.proxySecret, 'utf8');
         const supplied = Buffer.from(suppliedSecret, 'utf8');
         if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
-            throw new PluginError(401, 'INVALID_PROXY_SECRET', 'The proxy credential is invalid.');
+            throw new PluginError(401, 'INVALID_PROXY_SECRET', '代理凭证无效。');
         }
 
         if (validator !== undefined) {

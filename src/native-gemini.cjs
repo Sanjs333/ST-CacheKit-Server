@@ -52,8 +52,8 @@ const isVisiblePart = part => !part.thought && ((typeof part.text === 'string' &
 function noVisibleOutput(reason) {
     const safeReason = typeof reason === 'string' && /^[A-Z_]{1,80}$/u.test(reason) ? reason : undefined;
     const details = safeReason ? { reason: safeReason } : undefined;
-    if (safeReason === 'MAX_TOKENS') return new PluginError(502, 'GEMINI4_OUTPUT_BUDGET_EXHAUSTED', 'Gemini 4 used the whole output budget before writing reply text. Thinking tokens count toward the maximum response length; raise it or lower the reasoning effort.', { details });
-    return new PluginError(502, 'NATIVE_GEMINI_EMPTY_RESPONSE', `Native Gemini returned no reply text${safeReason ? ` (${safeReason})` : ''}.`, { details });
+    if (safeReason === 'MAX_TOKENS') return new PluginError(502, 'GEMINI4_OUTPUT_BUDGET_EXHAUSTED', 'Gemini 4 在输出正文前已耗尽输出额度。思考 tokens 也计入最大回复长度，请提高输出上限或降低思考强度。', { details });
+    return new PluginError(502, 'NATIVE_GEMINI_EMPTY_RESPONSE', `Gemini 原生接口未返回回复正文${safeReason ? ` (${safeReason})` : ''}。`, { details });
 }
 // The host reads data.error.message from both JSON failures and SSE events.
 const hostErrorBody = error => ({ error: errorPayload(error), code: error.code, message: error.message });
@@ -69,7 +69,7 @@ async function readLoopbackFailure(upstream) {
         const details = body.details && typeof body.details === 'object' && !Array.isArray(body.details) ? body.details : undefined;
         return new PluginError(status, body.code, body.message.slice(0, 1000), { details });
     }
-    return new PluginError(status, 'NATIVE_GEMINI_UPSTREAM_FAILED', 'Native Gemini generation failed.');
+    return new PluginError(status, 'NATIVE_GEMINI_UPSTREAM_FAILED', 'Gemini 原生生成请求失败。');
 }
 function collectTextParts(parts) {
     return (parts ?? []).filter(part => !part.thought && typeof part.text === 'string').map(part => ({ text: part.text, ...(typeof part.thoughtSignature === 'string' ? { thoughtSignature: part.thoughtSignature } : {}) }));
@@ -81,10 +81,10 @@ function packTextSignature(parts) {
     return TEXT_PREFIX + Buffer.from(json).toString('base64url');
 }
 async function buildNativeGeminiBody(input, runtime) {
-    if (!isGemini4Model(input.model)) throw new PluginError(400, 'NATIVE_GEMINI_MODEL_UNSUPPORTED', 'Native Gemini generation requires a supported Gemini 4 model.');
-    if (!['makersuite', 'vertexai'].includes(input.chat_completion_source)) throw new PluginError(400, 'NATIVE_GEMINI_SOURCE_UNSUPPORTED', 'Native Gemini generation requires a Google source.');
-    if (!Array.isArray(input.messages) || !input.messages.length) throw new PluginError(400, 'INVALID_REQUEST', 'Messages are required.');
-    if (!Number.isSafeInteger(input.max_tokens) || input.max_tokens < 1 || input.max_tokens > 1048576) throw new PluginError(400, 'INVALID_REQUEST', 'The output token limit must be between 1 and 1048576.');
+    if (!isGemini4Model(input.model)) throw new PluginError(400, 'NATIVE_GEMINI_MODEL_UNSUPPORTED', 'Gemini 原生生成需要使用受支持的 Gemini 4 模型。');
+    if (!['makersuite', 'vertexai'].includes(input.chat_completion_source)) throw new PluginError(400, 'NATIVE_GEMINI_SOURCE_UNSUPPORTED', 'Gemini 原生生成需要使用 Google 服务来源。');
+    if (!Array.isArray(input.messages) || !input.messages.length) throw new PluginError(400, 'INVALID_REQUEST', '请求必须包含消息内容。');
+    if (!Number.isSafeInteger(input.max_tokens) || input.max_tokens < 1 || input.max_tokens > 1048576) throw new PluginError(400, 'INVALID_REQUEST', '输出 token 上限必须在 1 到 1048576 之间。');
     const helpers = await runtime.getNativeGeminiHelpers();
     let messages = structuredClone(input.messages);
     const calls = [], responses = [], signatures = new Map(), idMap = new Map();
@@ -117,7 +117,7 @@ async function buildNativeGeminiBody(input, runtime) {
     }
     const names = { charName: String(input.char_name || ''), userName: String(input.user_name || ''), groupNames: Array.isArray(input.group_names) ? input.group_names.map(String) : [], startsWithGroupName(text) { return this.groupNames.some(name => text.startsWith(`${name}: `)); } };
     if (input.custom_prompt_post_processing) {
-        if (typeof helpers.postProcessPrompt !== 'function') throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'The host prompt post-processor is unavailable.');
+        if (typeof helpers.postProcessPrompt !== 'function') throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆的提示词后处理接口不可用。');
         messages = helpers.postProcessPrompt(messages, input.custom_prompt_post_processing, names);
     }
     const prompt = helpers.convertGooglePrompt(messages, input.model, Boolean(input.use_sysprompt), names);
@@ -186,14 +186,14 @@ function requestLoopback(url, { method, headers, body, signal, timeoutMs = 31 * 
                     const chunks = []; let size = 0;
                     for await (const chunk of incoming) {
                         size += chunk.length;
-                        if (size > 512 * 1024 * 1024) { incoming.destroy(); throw new Error('Response too large'); }
+                        if (size > 512 * 1024 * 1024) { incoming.destroy(); throw new Error('响应内容超过大小上限'); }
                         chunks.push(chunk);
                     }
                     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
                 },
             });
         });
-        outgoing.setTimeout(timeoutMs, () => outgoing.destroy(new Error('Local generation timed out')));
+        outgoing.setTimeout(timeoutMs, () => outgoing.destroy(new Error('本地生成请求超时')));
         outgoing.once('error', reject);
         outgoing.end(body);
     });
@@ -213,17 +213,17 @@ function createNativeGeminiHandler({ runtime, loopbackTransport, fetchImpl = req
         const close = () => { if (!response.writableEnded) abort(); };
         request.once('aborted', abort); response.once('close', close);
         try {
-            if (!request.user?.directories?.root) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated user is required.');
+            if (!request.user?.directories?.root) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录用户账号。');
             const input = request.body ?? {};
             const base = loopbackTransport.baseUrl;
             const prefix = `${base}/proxy/`;
-            if (typeof base !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/u.test(base) || typeof input.reverse_proxy !== 'string' || !input.reverse_proxy.startsWith(prefix) || !/^[A-Za-z0-9_-]+$/u.test(input.reverse_proxy.slice(prefix.length))) throw new PluginError(400, 'INVALID_PROXY_TARGET', 'The prepared local proxy target is invalid.');
-            if (typeof input.proxy_password !== 'string' || !input.proxy_password || /[\r\n]/u.test(input.proxy_password)) throw new PluginError(400, 'INVALID_REQUEST', 'A prepared proxy credential is required.');
+            if (typeof base !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/u.test(base) || typeof input.reverse_proxy !== 'string' || !input.reverse_proxy.startsWith(prefix) || !/^[A-Za-z0-9_-]+$/u.test(input.reverse_proxy.slice(prefix.length))) throw new PluginError(400, 'INVALID_PROXY_TARGET', '准备的本地代理目标无效。');
+            if (typeof input.proxy_password !== 'string' || !input.proxy_password || /[\r\n]/u.test(input.proxy_password)) throw new PluginError(400, 'INVALID_REQUEST', '缺少准备阶段签发的代理凭证。');
             const body = await buildNativeGeminiBody(input, runtime);
             const endpoint = input.stream ? 'streamGenerateContent' : 'generateContent';
             const source = input.chat_completion_source;
             const apiVersion = input.native_gemini_api_version ?? 'v1beta';
-            if (!['v1', 'v1beta', 'v1alpha'].includes(apiVersion)) throw new PluginError(400, 'INVALID_REQUEST', 'The native Gemini API version is unsupported.');
+            if (!['v1', 'v1beta', 'v1alpha'].includes(apiVersion)) throw new PluginError(400, 'INVALID_REQUEST', '当前 Gemini 原生 API 版本不受支持。');
             const suffix = source === 'vertexai' ? `/v1/publishers/google/models/${input.model}:${endpoint}` : `/${apiVersion}/models/${input.model}:${endpoint}`;
             const url = new URL(input.reverse_proxy + suffix);
             if (input.stream) url.searchParams.set('alt', 'sse');
@@ -242,7 +242,7 @@ function createNativeGeminiHandler({ runtime, loopbackTransport, fetchImpl = req
                 response.setHeader('Content-Type', 'text/event-stream');
                 let buffer = '';
                 const maxEventCharacters = 32 * 1024 * 1024;
-                const tooLarge = () => new PluginError(502, 'NATIVE_GEMINI_INVALID_RESPONSE', 'Native Gemini returned a stream event that is too large.');
+                const tooLarge = () => new PluginError(502, 'NATIVE_GEMINI_INVALID_RESPONSE', 'Gemini 原生接口返回的流式事件超过大小上限。');
                 const decoder = new TextDecoder();
                 const state = { textParts: [], visible: false, errored: false, reason: undefined };
                 streaming = true;
@@ -279,7 +279,7 @@ function createNativeGeminiHandler({ runtime, loopbackTransport, fetchImpl = req
                 completed({ model: input.model, stream: false, finishReason: data.candidates?.[0]?.finishReason, usageMetadata: sanitizeUsage(data.usageMetadata) });
             }
         } catch (error) {
-            const failure = error instanceof PluginError ? error : new PluginError(502, 'NATIVE_GEMINI_FAILED', 'Native Gemini generation could not be completed.');
+            const failure = error instanceof PluginError ? error : new PluginError(502, 'NATIVE_GEMINI_FAILED', 'Gemini 原生生成请求未能完成。');
             if (controller.signal.aborted) log('info', 'request cancelled:', { elapsedMs: Date.now() - started });
             else log('warn', 'request failed:', { code: failure.code, status: failure.status, elapsedMs: Date.now() - started });
             if (controller.signal.aborted || response.writableEnded) { if (streaming && !response.writableEnded) response.destroy?.(); }
@@ -314,6 +314,6 @@ function transformFrame(frame, state) {
             }
         }
         return lines.filter(line => !line.startsWith('data:')).concat(`data: ${JSON.stringify(parsed)}`).join('\n') + '\n\n';
-    } catch { throw new PluginError(502, 'NATIVE_GEMINI_INVALID_RESPONSE', 'Native Gemini returned an invalid stream.'); }
+    } catch { throw new PluginError(502, 'NATIVE_GEMINI_INVALID_RESPONSE', 'Gemini 原生接口返回了无效的流式响应。'); }
 }
 module.exports = { createNativeGeminiHandler, buildNativeGeminiBody, wrapToolMetadata, unpackToolSignature, requestLoopback, unpackTextSignature, packTextSignature };

@@ -22,7 +22,7 @@ function parseAndValidateGoogleTarget(rawUrl, { model, region, stream, source = 
     try {
         target = new URL(rawUrl);
     } catch {
-        throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'SillyTavern returned an invalid Google endpoint.');
+        throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'SillyTavern 返回的 Google 请求地址无效。');
     }
 
     const aiStudio = source === 'makersuite';
@@ -35,7 +35,7 @@ function parseAndValidateGoogleTarget(rawUrl, { model, region, stream, source = 
             if (!['http:', 'https:'].includes(proxyBase.protocol) || proxyBase.username || proxyBase.password
                 || proxyBase.search || proxyBase.hash) throw new Error();
         } catch {
-            throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'The stored AI Studio proxy base failed validation.');
+            throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', '保存的 AI Studio 代理基础地址校验失败。');
         }
     }
     const expectedHost = aiStudio ? 'generativelanguage.googleapis.com' : region === 'global'
@@ -56,16 +56,16 @@ function parseAndValidateGoogleTarget(rawUrl, { model, region, stream, source = 
         || target.hash !== ''
         || !expectedPath.test(target.pathname)
     ) {
-        throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'SillyTavern returned a Google endpoint outside the approved provider target.');
+        throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'SillyTavern 返回的 Google 请求地址不符合当前服务来源的地址规则。');
     }
 
     const queryEntries = [...target.searchParams.entries()];
     if (prepared && stream) {
         if (queryEntries.length !== 1 || queryEntries[0][0] !== 'alt' || queryEntries[0][1] !== 'sse') {
-            throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'The stored streaming endpoint failed validation.');
+            throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', '保存的流式请求地址校验失败。');
         }
     } else if (queryEntries.length !== 0) {
-        throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'The Vertex AI endpoint contains an unexpected query.');
+        throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', 'Vertex AI 请求地址包含不支持的查询参数。');
     }
 
     return target;
@@ -85,7 +85,7 @@ function validatePreparedGoogleTarget(rawUrl, config) {
 
 function prepareGoogleHeaders(configHeaders, payGoHeaders, { allowUnauthenticated = false } = {}) {
     if (!configHeaders || typeof configHeaders !== 'object' || Array.isArray(configHeaders)) {
-        throw new PluginError(500, 'UNSAFE_GOOGLE_HEADERS', 'SillyTavern returned invalid Vertex AI headers.');
+        throw new PluginError(500, 'UNSAFE_GOOGLE_HEADERS', 'SillyTavern 返回的 Vertex AI 请求头无效。');
     }
 
     const headers = {};
@@ -95,7 +95,7 @@ function prepareGoogleHeaders(configHeaders, payGoHeaders, { allowUnauthenticate
         // than falling back to the user's real Google credential.
         if (allowUnauthenticated && normalizedName === 'x-goog-api-key' && (value === '' || value == null)) continue;
         if (!ALLOWED_GOOGLE_HEADERS.has(normalizedName) || typeof value !== 'string' || value.length === 0) {
-            throw new PluginError(500, 'UNSAFE_GOOGLE_HEADERS', 'SillyTavern returned an unexpected Vertex AI header.');
+            throw new PluginError(500, 'UNSAFE_GOOGLE_HEADERS', 'SillyTavern 返回了不支持的 Vertex AI 请求头。');
         }
         headers[name] = value;
     }
@@ -103,7 +103,7 @@ function prepareGoogleHeaders(configHeaders, payGoHeaders, { allowUnauthenticate
         headers['Content-Type'] = 'application/json';
     }
     if (!allowUnauthenticated && !Object.keys(headers).some(name => ['authorization', 'x-goog-api-key'].includes(name.toLowerCase()))) {
-        throw new PluginError(500, 'UNSAFE_GOOGLE_HEADERS', 'SillyTavern did not return Vertex AI authentication.');
+        throw new PluginError(500, 'UNSAFE_GOOGLE_HEADERS', 'SillyTavern 未提供 Vertex AI 认证信息。');
     }
 
     return Object.freeze({ ...headers, ...payGoHeaders });

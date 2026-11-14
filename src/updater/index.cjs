@@ -36,8 +36,8 @@ const {
 const ACTIVE_STATUSES = Object.freeze(['update', 'unchanged', 'keep-ahead']);
 
 const COMPONENTS = Object.freeze([
-    Object.freeze({ name: 'frontend', label: 'frontend extension', remote: OFFICIAL_REMOTES.frontend }),
-    Object.freeze({ name: 'server', label: 'server plugin', remote: OFFICIAL_REMOTES.server }),
+    Object.freeze({ name: 'frontend', label: '前端扩展', remote: OFFICIAL_REMOTES.frontend }),
+    Object.freeze({ name: 'server', label: '服务端插件', remote: OFFICIAL_REMOTES.server }),
 ]);
 
 // The activated tree must still be the component it claims to be, must still
@@ -46,21 +46,21 @@ function verifyPayload(component, directory) {
     if (component.name === 'frontend') {
         const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
         if (!frontendIdentity(directory)) {
-            throw new PluginError(409, 'UPDATER_PAYLOAD_MISMATCH', 'The prepared frontend copy is not the 提示词缓存优化 extension.');
+            throw new PluginError(409, 'UPDATER_PAYLOAD_MISMATCH', '准备的前端副本不是提示词缓存优化扩展。');
         }
         for (const field of ['js', 'css']) {
             const entry = manifest[field];
             if (typeof entry !== 'string' || !isFileInside(directory, entry)) {
-                throw new PluginError(409, 'UPDATER_PAYLOAD_INCOMPLETE', `The prepared frontend copy is missing its ${field} entry point.`);
+                throw new PluginError(409, 'UPDATER_PAYLOAD_INCOMPLETE', `准备的前端副本缺少 ${field} 入口文件。`);
             }
         }
     } else {
         const pkg = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
         if (!serverIdentity(directory)) {
-            throw new PluginError(409, 'UPDATER_PAYLOAD_MISMATCH', 'The prepared server copy is not the 提示词缓存优化 server plugin.');
+            throw new PluginError(409, 'UPDATER_PAYLOAD_MISMATCH', '准备的服务端副本不是提示词缓存优化服务端插件。');
         }
         if (typeof pkg.main !== 'string' || !isFileInside(directory, pkg.main)) {
-            throw new PluginError(409, 'UPDATER_PAYLOAD_INCOMPLETE', 'The prepared server copy is missing its main entry point.');
+            throw new PluginError(409, 'UPDATER_PAYLOAD_INCOMPLETE', '准备的服务端副本缺少主入口文件。');
         }
     }
     assertNoSymlinks(directory);
@@ -79,7 +79,7 @@ function assertNoSymlinks(directory) {
         if (entry.name === '.git') continue;
         const child = path.join(directory, entry.name);
         if (entry.isSymbolicLink() || fs.lstatSync(child).isSymbolicLink()) {
-            throw new PluginError(409, 'UPDATER_PAYLOAD_SYMLINK', `The prepared copy contains a symlink: ${child}`);
+            throw new PluginError(409, 'UPDATER_PAYLOAD_SYMLINK', `准备的副本包含符号链接：${child}`);
         }
         if (entry.isDirectory()) assertNoSymlinks(child);
     }
@@ -115,14 +115,14 @@ function createUpdater({
             throw new PluginError(
                 409,
                 'UPDATER_COMPONENT_MISSING',
-                `The ${component.label} could not be found where this host installs it. Install it with the host's own installer, then retry.`,
+                `未在酒馆安装目录中找到${component.label}，请通过酒馆安装后重试。`,
             );
         }
         if (found.length > 1) {
             throw new PluginError(
                 409,
                 'UPDATER_COMPONENT_AMBIGUOUS',
-                `Several copies of the ${component.label} exist: ${found.join(', ')}. Remove the extra copies and retry.`,
+                `检测到多个${component.label}副本：${found.join(', ')}。请移除多余副本后重试。`,
             );
         }
         return found[0];
@@ -139,7 +139,7 @@ function createUpdater({
             originMismatch: Boolean(installation.remoteUrl) && installation.remoteUrl !== component.remote,
         };
         if (!installation.isRepository) {
-            return { ...base, status: 'not-a-repository', reason: 'This copy is not a Git checkout, so the panel cannot update it. Use the installer script for a ZIP installation.' };
+            return { ...base, status: 'not-a-repository', reason: '当前副本不是 Git 仓库，无法在面板中更新。通过 ZIP 安装的副本请使用安装脚本更新。' };
         }
         const channel = inferChannel({
             symbolicBranch: installation.branch,
@@ -219,8 +219,8 @@ function createUpdater({
                 ...component,
                 status: 'blocked',
                 code: 'UPDATER_PROTOCOL_MISMATCH',
-                reason: `Updating the ${component.label} would require protocol v${conflict.protocol}, `
-                    + `but the ${other.label} stays on v${conflict.otherProtocol}. Update the ${other.label} as well, or wait for a compatible release.`,
+                reason: `更新${component.label}需要协议 v${conflict.protocol}，`
+                    + `但${other.label}仍使用 v${conflict.otherProtocol}。请同时更新${other.label}，或等待兼容版本。`,
             };
         });
     }
@@ -299,7 +299,7 @@ function createUpdater({
     // a replacement that is already moving files.
     function start() {
         if (job !== null) {
-            throw new PluginError(409, 'UPDATER_IN_PROGRESS', 'An update is already running.');
+            throw new PluginError(409, 'UPDATER_IN_PROGRESS', '已有更新任务正在运行。');
         }
         job = { phase: 'checking', startedAt: now().toISOString() };
         lastResult = null;
@@ -338,7 +338,7 @@ function createUpdater({
                 throw new PluginError(
                     409,
                     'UPDATER_COMPONENT_BLOCKED',
-                    `The update was not started: ${blocked.map(component => `${component.label}: ${component.reason ?? component.status}`).join(' ')}`,
+                    `更新未启动：${blocked.map(component => `${component.label}: ${component.reason ?? component.status}`).join(' ')}`,
                 );
             }
             if (changing.length === 0) {
@@ -372,7 +372,7 @@ function createUpdater({
                     || current.head !== component.installed.commit || current.branch !== component.installed.branch
                     || !isDeepStrictEqual(current.metadata ?? null, component.originalMetadata)) {
                     throw new PluginError(409, 'UPDATER_INSTALLATION_CHANGED',
-                        `The ${component.label} changed during preparation. Nothing was replaced; check again.`);
+                        `${component.label}在准备更新期间发生变化，请重新检查更新。`);
                 }
             }
             const entries = changing.map(component => ({

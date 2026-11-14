@@ -80,30 +80,30 @@ function sanitizeServerDetails(details) {
 
 function validateClientLogEvent(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log event must be an object.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志必须是对象。');
     }
     if (Object.keys(body).some(key => !['level', 'event', 'context'].includes(key))) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log event contains an unsupported field.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志包含不支持的字段。');
     }
     if (!LEVELS.has(body.level) || typeof body.event !== 'string' || body.event.length > MAX_EVENT_LENGTH || !EVENT_PATTERN.test(body.event)) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log event level or name is invalid.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志级别或事件名称无效。');
     }
 
     const inputContext = body.context === undefined ? {} : body.context;
     if (!inputContext || typeof inputContext !== 'object' || Array.isArray(inputContext)) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log context must be an object.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志的上下文必须是对象。');
     }
 
     const entries = Object.entries(inputContext);
     if (entries.length > MAX_DETAIL_KEYS) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log context contains too many fields.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志的上下文字段过多。');
     }
 
     const context = {};
     for (const [key, value] of entries) {
         const validator = CLIENT_DETAIL_VALIDATORS[key];
         if (!validator || !validator(value)) {
-            throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', `Invalid client log context field: ${key}.`);
+            throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', `客户端日志上下文字段无效：${key}。`);
         }
         context[key] = value;
     }
@@ -116,7 +116,7 @@ function validateClientLogEvent(body) {
     // Measure only the already validated, bounded structure. The HTTP handler
     // enforces the same limit while streaming, before parsing any JSON.
     if (Buffer.byteLength(JSON.stringify(event)) > MAX_CLIENT_EVENT_BYTES) {
-        throw new PluginError(413, 'CLIENT_LOG_EVENT_TOO_LARGE', 'The client log event is too large.');
+        throw new PluginError(413, 'CLIENT_LOG_EVENT_TOO_LARGE', '客户端日志内容超过大小上限。');
     }
     return Object.freeze(event);
 }

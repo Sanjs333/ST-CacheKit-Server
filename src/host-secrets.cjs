@@ -7,22 +7,22 @@ const { PluginError } = require('./errors.cjs');
 // Never fall back to the active credential when a specific ID was selected.
 function createHostSecretReader({ secretsModule, legacy = false }) {
     if (typeof secretsModule?.readSecret !== 'function' || !secretsModule.SECRET_KEYS) {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'The host secret reader is unavailable.');
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆的密钥读取接口不可用。');
     }
     if (legacy && (typeof secretsModule.SecretManager !== 'function'
         || typeof secretsModule.SecretManager.prototype?.readSecret !== 'function')) {
-        throw new PluginError(500, 'INCOMPATIBLE_HOST_SECRET_MANAGER', 'This legacy host lacks the required by-ID SecretManager interface.');
+        throw new PluginError(500, 'INCOMPATIBLE_HOST_SECRET_MANAGER', '当前酒馆版本缺少按 ID 读取密钥的接口，请更新酒馆。');
     }
     return function readHostSecret(directories, key, id = null) {
         const selected = id !== undefined && id !== null && id !== '';
         if (selected && (typeof id !== 'string' || id !== id.trim() || id.length > 256)) {
-            throw new PluginError(400, 'EXPLICIT_SECRET_UNSUPPORTED', 'The selected credential ID is invalid.');
+            throw new PluginError(400, 'EXPLICIT_SECRET_UNSUPPORTED', '所选密钥的 ID 无效。');
         }
         try {
             if (legacy && selected) return new secretsModule.SecretManager(directories).readSecret(key, id);
             return selected ? secretsModule.readSecret(directories, key, id) : secretsModule.readSecret(directories, key);
         } catch {
-            throw new PluginError(400, 'EXPLICIT_SECRET_UNAVAILABLE', 'The host credential could not be read.');
+            throw new PluginError(400, 'EXPLICIT_SECRET_UNAVAILABLE', '无法读取酒馆保存的密钥。');
         }
     };
 }

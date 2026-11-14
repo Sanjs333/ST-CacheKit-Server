@@ -34,7 +34,7 @@ function fail(code, message) {
 
 function validateRef(ref, label) {
     if (typeof ref !== 'string' || ref.length === 0 || !REF_PATTERN.test(ref) || ref.includes('..')) {
-        fail('UPDATER_INVALID_REF', `Invalid ${label} name.`);
+        fail('UPDATER_INVALID_REF', `${label}名称无效。`);
     }
     return ref;
 }
@@ -56,7 +56,7 @@ function compareTags(left, right) {
     if (!a || !b) {
         fail(
             'UPDATER_UNKNOWN_TAG_SHAPE',
-            `Cannot compare ${left} and ${right}: the updater only understands vMAJOR.MINOR.PATCH tags.`,
+            `无法比较 ${left} 和 ${right}：更新器仅支持 v主版本.次版本.修订版本 格式的标签。`,
         );
     }
     for (let index = 0; index < a.core.length; index += 1) {
@@ -90,7 +90,7 @@ function compareTags(left, right) {
 // Behaviour is checked against native Git in updater-version-policy-git.test.
 function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]?.oid }) {
     if (!Array.isArray(branchHistory) || branchHistory.length === 0) {
-        fail('UPDATER_NO_HISTORY', 'The selected branch history is required to resolve the newest release tag.');
+        fail('UPDATER_NO_HISTORY', '需要读取所选分支的提交历史，才能确定最新发布标签。');
     }
     const byCommit = new Map();
     for (const entry of Array.isArray(tags) ? tags : []) {
@@ -98,7 +98,7 @@ function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]
         if (!byCommit.has(entry.commit)) byCommit.set(entry.commit, []);
         byCommit.get(entry.commit).push(entry.name);
     }
-    if (byCommit.size === 0) fail('UPDATER_NO_TAG', 'No release tag is available for the selected branch.');
+    if (byCommit.size === 0) fail('UPDATER_NO_TAG', '所选分支没有可用的发布标签。');
     const graph = new Map(branchHistory.map(entry => [entry.oid, entry]));
     const queued = new Set([branchHead]);
     const coverage = new Map();
@@ -109,7 +109,7 @@ function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]
         if (candidates.length === Math.min(10, byCommit.size)) break;
         const oid = queue.shift();
         const entry = graph.get(oid);
-        if (!entry || !Array.isArray(entry.parents)) fail('UPDATER_NO_HISTORY', 'The staged commit graph is incomplete.');
+        if (!entry || !Array.isArray(entry.parents)) fail('UPDATER_NO_HISTORY', '准备的提交历史不完整。');
         const coveredBy = coverage.get(oid) ?? new Set();
         if (byCommit.has(oid)) {
             const candidate = { oid, distance: walked };
@@ -122,7 +122,7 @@ function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]
         }
         walked++;
         for (const parent of entry.parents) {
-            if (!graph.has(parent)) fail('UPDATER_NO_HISTORY', 'The staged commit graph is incomplete.');
+            if (!graph.has(parent)) fail('UPDATER_NO_HISTORY', '准备的提交历史不完整。');
             const inherited = coverage.get(parent) ?? new Set();
             for (const candidate of coveredBy) inherited.add(candidate);
             coverage.set(parent, inherited);
@@ -133,12 +133,12 @@ function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]
         }
         queue.sort((a, b) => graph.get(b).timestamp - graph.get(a).timestamp);
     }
-    if (candidates.length === 0) fail('UPDATER_NO_REACHABLE_TAG', 'No release tag is reachable from the selected branch.');
+    if (candidates.length === 0) fail('UPDATER_NO_REACHABLE_TAG', '所选分支的提交历史中找不到发布标签。');
     candidates.sort((a, b) => a.distance - b.distance);
     const commit = candidates[0].oid;
     const names = byCommit.get(commit);
     if (names.some(name => !parseTag(name))) {
-        fail('UPDATER_UNKNOWN_TAG_SHAPE', 'The selected commit has a tag outside the supported vMAJOR.MINOR.PATCH format.');
+        fail('UPDATER_UNKNOWN_TAG_SHAPE', '所选提交的标签不符合支持的 v主版本.次版本.修订版本 格式。');
     }
     return Object.freeze({ name: names.slice().sort(compareTags).at(-1), commit });
 }
@@ -146,16 +146,16 @@ function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]
 function readMetadata(metadata) {
     if (metadata === undefined || metadata === null) return null;
     if (typeof metadata !== 'object' || Array.isArray(metadata) || metadata.schema !== METADATA_SCHEMA) {
-        fail('UPDATER_INVALID_METADATA', 'The PayGo updater metadata is not schema version 1.');
+        fail('UPDATER_INVALID_METADATA', '插件更新记录的格式版本不是 1。');
     }
     if (metadata.mode !== MODE_TAG && metadata.mode !== MODE_COMMIT) {
-        fail('UPDATER_INVALID_METADATA', 'The PayGo updater metadata records an unknown mode.');
+        fail('UPDATER_INVALID_METADATA', '插件更新记录包含未知的更新方式。');
     }
     return Object.freeze({
         schema: METADATA_SCHEMA,
-        branch: validateRef(metadata.branch, 'tracking branch'),
+        branch: validateRef(metadata.branch, '跟踪分支'),
         mode: metadata.mode,
-        tag: metadata.tag === null || metadata.tag === undefined ? null : validateRef(metadata.tag, 'tag'),
+        tag: metadata.tag === null || metadata.tag === undefined ? null : validateRef(metadata.tag, '标签'),
         commit: typeof metadata.commit === 'string' ? metadata.commit : null,
     });
 }
@@ -163,9 +163,9 @@ function readMetadata(metadata) {
 // An installation made by the host UI has no updater metadata yet, so the
 // channel is inferred the same way the CLI infers it.
 function inferChannel({ symbolicBranch = null, metadata = undefined, headTags = [], defaultBranch = 'main' }) {
-    validateRef(defaultBranch, 'default branch');
+    validateRef(defaultBranch, '默认分支');
     const stored = readMetadata(metadata);
-    if (symbolicBranch !== null) validateRef(symbolicBranch, 'branch');
+    if (symbolicBranch !== null) validateRef(symbolicBranch, '分支');
     const channel = inferUpdateChannel({
         symbolicBranch,
         recordedBranch: stored?.branch,
@@ -176,7 +176,7 @@ function inferChannel({ symbolicBranch = null, metadata = undefined, headTags = 
     if (channel) return channel;
     fail(
         'UPDATER_CHANNEL_UNKNOWN',
-        'This installation does not record which release channel it follows. Run the installer once to record it, then retry.',
+        '当前安装未记录更新渠道，请运行一次安装器以记录渠道后重试。',
     );
 }
 
@@ -191,31 +191,31 @@ async function planUpdate({
     isAncestor,
 }) {
     if (typeof installedHead !== 'string' || installedHead.length === 0) {
-        fail('UPDATER_NOT_INSTALLED', 'No installed Git revision was found for this component.');
+        fail('UPDATER_NOT_INSTALLED', '未找到此组件已安装的 Git 版本。');
     }
     if (typeof branchHead !== 'string' || branchHead.length === 0) {
-        fail('UPDATER_NO_BRANCH_HEAD', 'The selected branch has no head revision.');
+        fail('UPDATER_NO_BRANCH_HEAD', '所选分支没有可用的最新提交。');
     }
     if (!target || typeof target.commit !== 'string' || (channel?.mode === MODE_TAG && typeof target.name !== 'string')) {
-        fail('UPDATER_NO_TARGET', 'The updater did not resolve a target release.');
+        fail('UPDATER_NO_TARGET', '更新器未能确定目标版本。');
     }
     if (typeof isAncestor !== 'function') {
         throw new TypeError('isAncestor is required.');
     }
     if (!channel || typeof channel.branch !== 'string' || typeof channel.mode !== 'string') {
-        fail('UPDATER_CHANNEL_UNKNOWN', 'The release channel is unknown.');
+        fail('UPDATER_CHANNEL_UNKNOWN', '更新渠道未知。');
     }
 
     if (dirtyTrackedCount > 0) {
         fail(
             'UPDATER_LOCAL_CHANGES',
-            `${dirtyTrackedCount} files have local changes or are untracked. Back them up and replace with the installer's --replace-modified option instead.`,
+            `有 ${dirtyTrackedCount} 个文件存在本地改动或未纳入版本控制。请先备份，再使用安装器的 --replace-modified 选项替换。`,
         );
     }
     if (!await isAncestor(installedHead, branchHead)) {
         fail(
             'UPDATER_LOCAL_COMMITS',
-            'The installed copy contains commits that are not on the selected branch. Use the installer with --replace-modified to back them up and replace them.',
+            '已安装副本包含所选分支之外的提交，请使用安装器的 --replace-modified 选项备份并替换。',
         );
     }
 
@@ -240,7 +240,7 @@ async function planUpdate({
         }
         fail(
             'UPDATER_OLDER_OR_DIVERGENT',
-            `The selected release ${target.name} is older than or divergent from the installed revision. Use the installer with --replace-modified to replace it.`,
+            `所选版本 ${target.name} 早于已安装版本，或与其提交历史不一致。请使用安装器的 --replace-modified 选项替换。`,
         );
     }
 

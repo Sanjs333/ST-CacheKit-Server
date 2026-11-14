@@ -11,7 +11,7 @@ const MAX_ERROR_BYTES = 64 * 1024;
 const redact = text => text.replace(/AIza[0-9A-Za-z_-]{35}/gu, '[redacted]').replace(/ya29\.[0-9A-Za-z._-]+/gu, '[redacted]');
 // Google's error message is the only actionable diagnosis (free tier, region,
 // invalid argument); keep it bounded and without credentials.
-function googleFailure(status, error, prefix = `The Google upstream returned HTTP ${status}`) {
+function googleFailure(status, error, prefix = `Google 上游返回 HTTP ${status}`) {
     const upstreamMessage = typeof error?.message === 'string'
         ? redact(error.message).replace(/\s+/gu, ' ').trim().slice(0, 500) : '';
     const googleStatus = typeof error?.status === 'string' && /^[A-Z_]{1,64}$/u.test(error.status) ? error.status : undefined;
@@ -52,11 +52,11 @@ function addUsage(total, usage) {
     return Object.keys(result).length ? result : null;
 }
 async function write(response, data) {
-    if (response.destroyed) throw protocolError('CLIENT_DISCONNECTED', 'The client disconnected.');
+    if (response.destroyed) throw protocolError('CLIENT_DISCONNECTED', '客户端连接已断开。');
     if (!response.write(data)) await new Promise((resolve, reject) => {
         const cleanup = () => { response.off('drain', drained); response.off('close', closed); response.off('error', failed); };
         const drained = () => { cleanup(); resolve(); };
-        const closed = () => { cleanup(); reject(protocolError('CLIENT_DISCONNECTED', 'The client disconnected.')); };
+        const closed = () => { cleanup(); reject(protocolError('CLIENT_DISCONNECTED', '客户端连接已断开。')); };
         const failed = error => { cleanup(); reject(error); };
         response.once('drain', drained); response.once('close', closed); response.once('error', failed);
     });
@@ -67,7 +67,7 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
     let activeIncoming;
     let gone = false;
     let usage = null;
-    const abort = () => { gone = true; activeIncoming?.destroy(); active?.destroy(protocolError('CLIENT_DISCONNECTED', 'The client disconnected.')); };
+    const abort = () => { gone = true; activeIncoming?.destroy(); active?.destroy(protocolError('CLIENT_DISCONNECTED', '客户端连接已断开。')); };
     const close = () => { if (!response.writableEnded) abort(); };
     request.once('aborted', abort);
     response.once('close', close);
@@ -76,12 +76,12 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
         let size = 0;
         for await (const chunk of request) {
             size += chunk.length;
-            if (size > maxBodyBytes) throw new PluginError(413, 'REQUEST_BODY_TOO_LARGE', 'The proxied Google request body is too large.');
+            if (size > maxBodyBytes) throw new PluginError(413, 'REQUEST_BODY_TOO_LARGE', '转发给 Google 的请求内容超过大小上限。');
             chunks.push(chunk);
         }
         let original;
-        try { original = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'The Google request must be a JSON object.'); }
-        if (!original || typeof original !== 'object' || Array.isArray(original)) throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'The Google request must be a JSON object.');
+        try { original = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。'); }
+        if (!original || typeof original !== 'object' || Array.isArray(original)) throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。');
         const config = { ...(original.generationConfig || {}) };
         for (const key of ['temperature', 'topP', 'topK', 'candidateCount', 'presencePenalty', 'frequencyPenalty']) delete config[key];
         original.generationConfig = config;
@@ -98,7 +98,7 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
         if (ticketData.source !== 'makersuite') upstreamTarget.pathname = upstreamTarget.pathname.replace(/^\/v1\//u, '/v1beta1/');
         validatePreparedGoogleTarget(upstreamTarget.toString(), ticketData);
         for (let hop = 0; hop < maxHops; hop++) {
-            if (gone) throw protocolError('CLIENT_DISCONNECTED', 'The client disconnected.');
+            if (gone) throw protocolError('CLIENT_DISCONNECTED', '客户端连接已断开。');
             const body = { ...original, generationConfig: { ...config } };
             if (token) body.continuationToken = token;
             const bytes = Buffer.from(JSON.stringify(body));
@@ -107,24 +107,24 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
                 headers['Content-Length'] = bytes.length;
                 active = upstreamRequest(upstreamTarget, { method: 'POST', headers }, resolve);
                 active.once('error', reject);
-                active.setTimeout?.(upstreamTimeoutMs, () => active.destroy(new PluginError(504, 'VERTEX_UPSTREAM_TIMEOUT', 'The Google upstream request timed out.')));
+                active.setTimeout?.(upstreamTimeoutMs, () => active.destroy(new PluginError(504, 'VERTEX_UPSTREAM_TIMEOUT', 'Google 上游请求超时，请稍后重试或检查网络与代理连接。')));
                 try { onRequest(bytes); } catch { /* Diagnostics cannot block generation. */ }
                 active.end(bytes);
             });
             activeIncoming = upstreamResponse;
-            if (gone) { upstreamResponse.destroy(); throw protocolError('CLIENT_DISCONNECTED', 'The client disconnected.'); }
+            if (gone) { upstreamResponse.destroy(); throw protocolError('CLIENT_DISCONNECTED', '客户端连接已断开。'); }
             const status = upstreamResponse.statusCode || 502;
-            if (status >= 300 && status < 400) { upstreamResponse.destroy(); throw protocolError('GEMINI4_UPSTREAM_HTTP_ERROR', `The Google upstream returned HTTP ${status}.`); }
+            if (status >= 300 && status < 400) { upstreamResponse.destroy(); throw protocolError('GEMINI4_UPSTREAM_HTTP_ERROR', `Google 上游返回 HTTP ${status}。`); }
             if (status >= 400) throw googleFailure(status, await readGoogleError(upstreamResponse));
             const encoding = upstreamResponse.headers?.['content-encoding'];
-            if (encoding && encoding !== 'identity') { upstreamResponse.destroy(); throw protocolError('GEMINI4_COMPRESSED_RESPONSE', 'The Google upstream returned unsupported compressed data.'); }
+            if (encoding && encoding !== 'identity') { upstreamResponse.destroy(); throw protocolError('GEMINI4_COMPRESSED_RESPONSE', 'Google 上游返回了暂不支持的压缩响应。'); }
             let latestUsage;
             let latestToken;
             let reason;
             let lastCandidate;
             const accept = async value => {
-                if (!value || typeof value !== 'object') throw protocolError('GEMINI4_UPSTREAM_ERROR', 'The Google upstream returned an error.');
-                if (value.error) throw googleFailure(Number.isSafeInteger(value.error.code) ? value.error.code : 502, value.error, 'The Google upstream returned an error');
+                if (!value || typeof value !== 'object') throw protocolError('GEMINI4_UPSTREAM_ERROR', 'Google 上游返回错误。');
+                if (value.error) throw googleFailure(Number.isSafeInteger(value.error.code) ? value.error.code : 502, value.error, 'Google 上游返回错误');
                 if (value.usageMetadata) { latestUsage = value.usageMetadata; onUsage(addUsage(usage, latestUsage), false); }
                 if (typeof value.continuationToken === 'string') latestToken = value.continuationToken;
                 const candidate = value.candidates?.[0];
@@ -137,7 +137,7 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
                 for (const part of candidate?.content?.parts || []) {
                     if (!ticketData.stream) {
                         retainedBytes += Buffer.byteLength(JSON.stringify(part));
-                        if (retainedBytes > maxBodyBytes) throw protocolError('GEMINI4_RESPONSE_TOO_LARGE', 'The Google response exceeded the transport limit.');
+                        if (retainedBytes > maxBodyBytes) throw protocolError('GEMINI4_RESPONSE_TOO_LARGE', 'Google 响应内容超过传输大小上限。');
                         parts.push(part);
                     }
                     else {
@@ -151,9 +151,9 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
             const decoder = new StringDecoder('utf8');
             let buffer = '';
             for await (const chunk of upstreamResponse) {
-                if (gone) { upstreamResponse.destroy(); throw protocolError('CLIENT_DISCONNECTED', 'The client disconnected.'); }
+                if (gone) { upstreamResponse.destroy(); throw protocolError('CLIENT_DISCONNECTED', '客户端连接已断开。'); }
                 buffer += decoder.write(chunk);
-                if (Buffer.byteLength(buffer) > maxBodyBytes) throw protocolError('GEMINI4_RESPONSE_TOO_LARGE', 'The Google response exceeded the transport limit.');
+                if (Buffer.byteLength(buffer) > maxBodyBytes) throw protocolError('GEMINI4_RESPONSE_TOO_LARGE', 'Google 响应内容超过传输大小上限。');
                 if (ticketData.stream) {
                     for (;;) {
                         const match = /\r?\n\r?\n/u.exec(buffer);
@@ -171,7 +171,7 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
                 if (data && data !== '[DONE]') await accept(JSON.parse(data));
             }
             if (ticketData.stream && !reason && !finalValue?.promptFeedback?.blockReason) {
-                throw protocolError('GEMINI4_INCOMPLETE_RESPONSE', 'The Google stream ended without a terminal finish reason.');
+                throw protocolError('GEMINI4_INCOMPLETE_RESPONSE', 'Google 流式响应提前结束，未返回生成结束原因。');
             }
             usage = addUsage(usage, latestUsage);
             onUsage(usage, false);
@@ -185,11 +185,11 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
             const perRequestCap = reason === 'MAX_TOKENS' && latestToken && ticketData.source === 'makersuite'
                 && bounded && measurable && spent < budget;
             if (reason === 'CONTINUATION' || perRequestCap) {
-                if (!latestToken) throw protocolError('GEMINI4_CONTINUATION_TOKEN_MISSING', 'The Google continuation response did not include a token.');
-                if (!bounded || !measurable) throw protocolError('GEMINI4_CONTINUATION_BUDGET_UNKNOWN', 'The Google continuation cannot proceed without an explicit output budget and output usage.');
+                if (!latestToken) throw protocolError('GEMINI4_CONTINUATION_TOKEN_MISSING', 'Google 续传响应缺少续传令牌。');
+                if (!bounded || !measurable) throw protocolError('GEMINI4_CONTINUATION_BUDGET_UNKNOWN', '缺少明确的输出上限或输出用量，无法继续 Google 续传。');
                 if (spent >= budget) reason = 'MAX_TOKENS';
                 else {
-                    if (seen.has(latestToken) || hop + 1 === maxHops) throw protocolError('GEMINI4_CONTINUATION_LIMIT', 'The Google continuation limit was reached.');
+                    if (seen.has(latestToken) || hop + 1 === maxHops) throw protocolError('GEMINI4_CONTINUATION_LIMIT', 'Google 续传次数已达到上限。');
                     seen.add(latestToken); token = latestToken; continue;
                 }
             }

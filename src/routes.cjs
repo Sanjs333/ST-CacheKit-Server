@@ -98,7 +98,7 @@ function registerRoutes(router, dependencies) {
     router.use('/rejected', (_request, response) => response.status(503).json({
         error: true,
         code: 'PAYGO_REQUEST_BLOCKED',
-        message: 'The 提示词缓存优化 request was blocked before proxy preparation completed.',
+        message: '提示词缓存优化请求在代理准备完成前被阻止。',
     }));
 }
 

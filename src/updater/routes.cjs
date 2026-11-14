@@ -19,7 +19,7 @@ const { requireAdministrator } = require('../admin-guard.cjs');
 
 const UPDATE_FORBIDDEN = Object.freeze({
     code: 'UPDATER_ACCESS_FORBIDDEN',
-    message: 'Administrator access is required to update the 提示词缓存优化 components.',
+    message: '更新提示词缓存优化组件需要管理员权限。',
 });
 
 function createCheckUpdateHandler({ updater, buildPolicy }) {
@@ -27,7 +27,7 @@ function createCheckUpdateHandler({ updater, buildPolicy }) {
         response.set?.('Cache-Control', 'no-store');
         try {
             requireAdministrator(request, UPDATE_FORBIDDEN);
-            if (buildPolicy?.upstreamUpdatesAllowed === false) throw new PluginError(409, 'LOCAL_PREVIEW_UPDATES_DISABLED', 'This local preview must be updated from its explicit local build, not the upstream updater.');
+            if (buildPolicy?.upstreamUpdatesAllowed === false) throw new PluginError(409, 'LOCAL_PREVIEW_UPDATES_DISABLED', '此本地预览版本需要通过对应的本地构建更新。');
             const report = await updater.check();
             return response.json({ ok: true, ...report });
         } catch (error) {
@@ -41,7 +41,7 @@ function createStartUpdateHandler({ updater, buildPolicy }) {
         response.set?.('Cache-Control', 'no-store');
         try {
             requireAdministrator(request, UPDATE_FORBIDDEN);
-            if (buildPolicy?.upstreamUpdatesAllowed === false) throw new PluginError(409, 'LOCAL_PREVIEW_UPDATES_DISABLED', 'This local preview must be updated from its explicit local build, not the upstream updater.');
+            if (buildPolicy?.upstreamUpdatesAllowed === false) throw new PluginError(409, 'LOCAL_PREVIEW_UPDATES_DISABLED', '此本地预览版本需要通过对应的本地构建更新。');
             updater.start();
             return response.status(202).json({ ok: true, started: true });
         } catch (error) {
@@ -55,7 +55,7 @@ function createUpdateStatusHandler({ updater, buildPolicy }) {
         response.set?.('Cache-Control', 'no-store');
         try {
             requireAdministrator(request, UPDATE_FORBIDDEN);
-            if (buildPolicy?.upstreamUpdatesAllowed === false) throw new PluginError(409, 'LOCAL_PREVIEW_UPDATES_DISABLED', 'This local preview must be updated from its explicit local build, not the upstream updater.');
+            if (buildPolicy?.upstreamUpdatesAllowed === false) throw new PluginError(409, 'LOCAL_PREVIEW_UPDATES_DISABLED', '此本地预览版本需要通过对应的本地构建更新。');
             return response.json({ ok: true, ...updater.status() });
         } catch (error) {
             return sendExpressError(response, error);

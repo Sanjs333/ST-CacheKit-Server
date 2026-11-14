@@ -29,7 +29,7 @@ const info = Object.freeze({
 let activeState;
 
 async function init(router) {
-    if (activeState) throw new Error('提示词缓存优化 server plugin is already initialized.');
+    if (activeState) throw new Error('提示词缓存优化服务端插件已初始化。');
 
     const logStore = new LogStore({ rootDir: process.cwd() });
     logStore.server('info', 'plugin_initializing');

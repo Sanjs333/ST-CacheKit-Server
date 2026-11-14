@@ -35,11 +35,11 @@ function acquireLock(rootDir) {
             throw new PluginError(
                 409,
                 'UPDATER_BUSY',
-                `Another installation or update is already running, or a previous one stopped before cleaning up ${LOCK_NAME}. Check that no installer is running, then remove that directory and retry.`,
+                `已有安装或更新任务正在运行，或上一次任务遗留了 ${LOCK_NAME} 目录。确认没有安装任务运行后，移除该目录再重试。`,
                 { cause: error },
             );
         }
-        throw new PluginError(500, 'UPDATER_LOCK_FAILED', `The update lock could not be created: ${error?.message ?? error}`, { cause: error });
+        throw new PluginError(500, 'UPDATER_LOCK_FAILED', `无法创建更新锁：${error?.message ?? error}`, { cause: error });
     }
     return lock;
 }
@@ -116,12 +116,12 @@ function activate({ rootDir, backup, entries }) {
     } catch (error) {
         const recoveryErrors = rollback(activated);
         const suffix = recoveryErrors.length > 0
-            ? ` Automatic rollback was incomplete: ${recoveryErrors.join('; ')}. Recover from ${backup}.`
-            : ` Existing files were restored from ${backup}.`;
+            ? `自动回滚未能完成：${recoveryErrors.join('; ')}。请从 ${backup} 恢复。`
+            : `原有文件已从 ${backup} 恢复。`;
         throw new PluginError(
             500,
             'UPDATER_ACTIVATION_FAILED',
-            `The update could not be activated: ${error?.message ?? error}.${suffix}`,
+            `更新启用失败：${error?.message ?? error}。${suffix}`,
             { cause: error },
         );
     }

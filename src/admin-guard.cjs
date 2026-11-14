@@ -16,7 +16,7 @@ const { PluginError } = require('./errors.cjs');
 
 function requireAuthenticatedUser(request) {
     if (!request.user || !request.user.directories) {
-        throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated SillyTavern user is required.');
+        throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录 SillyTavern 用户账号。');
     }
 }
 

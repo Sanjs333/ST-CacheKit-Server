@@ -24,7 +24,7 @@ function owner(request) {
     return createHash('sha256').update(JSON.stringify([identity, root])).digest('hex');
 }
 function modelId(value) {
-    if (typeof value !== 'string' || !value || value.length > 256 || value.trim() !== value || /[\x00-\x1f\x7f]/u.test(value)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_SCOPE', 'Invalid prompt inspector model.');
+    if (typeof value !== 'string' || !value || value.length > 256 || value.trim() !== value || /[\x00-\x1f\x7f]/u.test(value)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_SCOPE', '提示词查看器的模型参数无效。');
     return value;
 }
 function emptyTrace() { return { version: 1, complete: false, sources: [], stages: [], events: [] }; }
@@ -67,7 +67,7 @@ function normalizeTrace(input, limit) {
         if (data.version !== 1 || typeof data.complete !== 'boolean' || !Array.isArray(data.sources) || !Array.isArray(data.stages) || !Array.isArray(data.events)) throw new TypeError('Invalid trace.');
         if (data.sources.length > 256 || data.stages.length > 16 || data.events.length > 256) throw new RangeError('Bounded trace exceeded.');
         const sources = data.sources.map(source => {
-            if (!source || typeof source.id !== 'string' || typeof source.label !== 'string' || typeof source.text !== 'string') throw new TypeError('Invalid source.');
+            if (!source || typeof source.id !== 'string' || typeof source.label !== 'string' || typeof source.text !== 'string') throw new TypeError('请求来源无效。');
             const result = { id: source.id, kind: KINDS.has(source.kind) ? source.kind : 'unknown', label: source.label, text: source.text };
             for (const key of ['world', 'uid', 'constant', 'position', 'depth', 'role', 'identifier']) if (source[key] !== undefined && (typeof source[key] === 'string' || typeof source[key] === 'boolean' || typeof source[key] === 'number')) result[key] = source[key];
             if (typeof source.originalText === 'string') result.originalText = source.originalText;
@@ -175,22 +175,22 @@ class PromptInspectorStore {
     }
     prepare(request) {
         this.sweep(); const owned = owner(request);
-        if (!owned) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated profile and data root are required.');
-        if (this.closed) throw new PluginError(503, 'PROMPT_INSPECTOR_UNAVAILABLE', 'Prompt inspector is unavailable.');
+        if (!owned) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录用户账号，并确认用户数据目录可用。');
+        if (this.closed) throw new PluginError(503, 'PROMPT_INSPECTOR_UNAVAILABLE', '提示词查看器暂不可用。');
         const data = request.body;
-        if (!data || data.version !== 1 || !SOURCES.has(data.source)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_SCOPE', 'Invalid prompt inspector scope/version.');
+        if (!data || data.version !== 1 || !SOURCES.has(data.source)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_SCOPE', '提示词查看器的记录范围或版本无效。');
         if (NATIVE.has(data.source) && this.quiet(() => this.getCapability()) !== true) {
             throw new PluginError(503, 'NATIVE_PROMPT_CAPTURE_UNAVAILABLE',
-                'Final outbound capture is unavailable for this provider. Frontend request messages can be inspected without host changes.');
+                '当前服务商不支持捕获最终出站请求，可查看前端组装的消息。');
         }
         const chatId = validateChatId(data.chatId), model = modelId(data.model);
-        if (this.entries.size >= this.maxEntries || [...this.entries.values()].filter(e => e.owner === owned).length >= this.maxEntriesPerOwner) throw new PluginError(429, 'PROMPT_INSPECTOR_CAPACITY', 'Temporary prompt inspector capacity is exhausted.');
+        if (this.entries.size >= this.maxEntries || [...this.entries.values()].filter(e => e.owner === owned).length >= this.maxEntriesPerOwner) throw new PluginError(429, 'PROMPT_INSPECTOR_CAPACITY', '提示词临时记录已达到容量上限，请清理记录后重试。');
         let { trace, traceError } = normalizeTrace(data.trace, this.maxTraceBytes);
         let bytes = Buffer.byteLength(JSON.stringify(trace)) + 1024;
         if (this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) { trace = { ...emptyTrace(), reason: 'TRACE_LIMIT' }; traceError = 'TRACE_CAPACITY'; bytes = Buffer.byteLength(JSON.stringify(trace)) + 1024; }
-        if (this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) throw new PluginError(429, 'PROMPT_INSPECTOR_CAPACITY', 'Temporary prompt inspector capacity is exhausted.');
+        if (this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) throw new PluginError(429, 'PROMPT_INSPECTOR_CAPACITY', '提示词临时记录已达到容量上限，请清理记录后重试。');
         const ticket = this.idFactory();
-        if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(ticket) || this.entries.has(ticket) || this.tombstones.has(ticket)) throw new PluginError(503, 'PROMPT_INSPECTOR_UNAVAILABLE', 'Prompt inspector ticket issuance failed.');
+        if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(ticket) || this.entries.has(ticket) || this.tombstones.has(ticket)) throw new PluginError(503, 'PROMPT_INSPECTOR_UNAVAILABLE', '提示词查看凭证签发失败。');
         const expires = this.now() + this.ttlMs;
         const record = { version: 1, id: ticket, chatId, source: data.source, model, sequence: 0, capturedAt: new Date(this.now()).toISOString(),
             state: 'pending', complete: false, rawRequest: null, trace, metadata: traceError ? { traceError } : {} };
@@ -201,12 +201,12 @@ class PromptInspectorStore {
     matchQuery(entry, query) { return (query.chatId === undefined || query.chatId === entry.chatId) && (query.source === undefined || query.source === entry.source) && (query.model === undefined || query.model === entry.model); }
     read(request, remove = false) {
         this.sweep(); const owned = owner(request), query = request.query || {};
-        if (!owned) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated profile and data root are required.');
-        if (query.ticket !== undefined && (typeof query.ticket !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(query.ticket))) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', 'Invalid prompt inspector ticket.');
+        if (!owned) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录用户账号，并确认用户数据目录可用。');
+        if (query.ticket !== undefined && (typeof query.ticket !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(query.ticket))) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '提示词查看凭证无效。');
         if (query.chatId !== undefined) validateChatId(query.chatId);
-        if (query.source !== undefined && !SOURCES.has(query.source)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', 'Invalid source.');
+        if (query.source !== undefined && !SOURCES.has(query.source)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '请求来源无效。');
         if (query.model !== undefined) modelId(query.model);
-        if (query.ticket === undefined && query.chatId === undefined) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', 'A ticket or chatId is required.');
+        if (query.ticket === undefined && query.chatId === undefined) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '请求必须包含查看凭证或对话 ID。');
         let selected;
         if (query.ticket !== undefined) {
             const e = this.entries.get(query.ticket);
@@ -337,7 +337,7 @@ class PromptInspectorStore {
         try { stage = finalStage(raw, entry.source, this.maxBodyBytes); }
         catch {
             record.metadata.finalStageError = 'FINAL_STAGE_UNAVAILABLE';
-            stage = { id: 'backend-final', label: 'Final outbound request', messages: [], notes: ['Structured payload unavailable; exact final bytes are retained in rawRequest.'] };
+            stage = { id: 'backend-final', label: 'Final outbound request', messages: [], notes: ['无法解析请求结构，最终请求的原始内容已保存在 rawRequest 中。'] };
         }
         const stageBytes = stage ? Buffer.byteLength(JSON.stringify(stage)) : 0;
         if (this.usedBytes + this.bufferedBytes + size + stageBytes > this.maxTotalBytes) {

@@ -20,14 +20,14 @@ const {
 function requireLogReader(request) {
     requireAdministrator(request, {
         code: 'LOG_ACCESS_FORBIDDEN',
-        message: 'Administrator access is required to read the shared server log.',
+        message: '读取共享服务端日志需要管理员权限。',
     });
 }
 
 function requireLogWriter(request) {
     requireAdministrator(request, {
         code: 'CLIENT_LOG_ACCESS_FORBIDDEN',
-        message: 'Administrator access is required to write the shared server log.',
+        message: '写入共享服务端日志需要管理员权限。',
     });
 }
 
@@ -45,7 +45,7 @@ function requireClientLogMediaType(request) {
         throw new PluginError(
             415,
             'CLIENT_LOG_MEDIA_TYPE_REQUIRED',
-            `Client log events require ${CLIENT_LOG_MEDIA_TYPE}.`,
+            `客户端日志请求需要使用 ${CLIENT_LOG_MEDIA_TYPE} 内容类型。`,
         );
     }
 }
@@ -54,24 +54,24 @@ function validateDeclaredLength(request, maxBytes) {
     const value = request.headers?.['content-length'];
     if (value === undefined) return;
     if (typeof value !== 'string' || !/^\d+$/u.test(value)) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log content length is invalid.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志内容长度无效。');
     }
     const length = Number(value);
     if (!Number.isSafeInteger(length)) {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log content length is invalid.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志内容长度无效。');
     }
     if (length > maxBytes) {
-        throw new PluginError(413, 'CLIENT_LOG_EVENT_TOO_LARGE', 'The client log event is too large.');
+        throw new PluginError(413, 'CLIENT_LOG_EVENT_TOO_LARGE', '客户端日志内容超过大小上限。');
     }
 }
 
 function readBoundedBody(request, maxBytes) {
     if (typeof request?.on !== 'function' || typeof request?.once !== 'function') {
-        return Promise.reject(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log request body is unavailable.'));
+        return Promise.reject(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '无法读取客户端日志请求内容。'));
     }
     if (request.readableEnded) return Promise.resolve(Buffer.alloc(0));
     if (request.destroyed) {
-        return Promise.reject(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log request was interrupted.'));
+        return Promise.reject(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志请求已中断。'));
     }
 
     return new Promise((resolve, reject) => {
@@ -98,7 +98,7 @@ function readBoundedBody(request, maxBytes) {
             const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             totalBytes += buffer.byteLength;
             if (totalBytes > maxBytes) {
-                fail(new PluginError(413, 'CLIENT_LOG_EVENT_TOO_LARGE', 'The client log event is too large.'), true);
+                fail(new PluginError(413, 'CLIENT_LOG_EVENT_TOO_LARGE', '客户端日志内容超过大小上限。'), true);
                 return;
             }
             chunks.push(buffer);
@@ -109,8 +109,8 @@ function readBoundedBody(request, maxBytes) {
             cleanup();
             resolve(Buffer.concat(chunks, totalBytes));
         };
-        const onError = () => fail(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log request body could not be read.'));
-        const onAborted = () => fail(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log request was interrupted.'));
+        const onError = () => fail(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志请求内容读取失败。'));
+        const onAborted = () => fail(new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志请求已中断。'));
         const onClose = () => {
             if (!request.readableEnded) onAborted();
         };
@@ -131,7 +131,7 @@ async function readClientLogEvent(request) {
     try {
         body = JSON.parse(buffer.toString('utf8'));
     } catch {
-        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', 'The client log event must contain valid JSON.');
+        throw new PluginError(400, 'INVALID_CLIENT_LOG_EVENT', '客户端日志必须包含有效的 JSON 数据。');
     }
     return validateClientLogEvent(body);
 }
@@ -151,7 +151,7 @@ function createReadLogsHandler({ logStore }) {
             }
             return sendExpressError(response, error instanceof PluginError
                 ? error
-                : new PluginError(500, 'LOG_READ_FAILED', 'The 提示词缓存优化 log could not be read.', { cause: error }));
+                : new PluginError(500, 'LOG_READ_FAILED', '无法读取提示词缓存优化运行日志。', { cause: error }));
         }
     };
 }

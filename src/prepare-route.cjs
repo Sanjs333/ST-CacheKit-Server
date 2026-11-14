@@ -61,7 +61,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
         try {
             config = validatePreparePayload(request.body);
             if (!request.user?.directories || typeof request.user.directories.root !== 'string' || !request.user.directories.root) {
-                throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated SillyTavern user is required.');
+                throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录 SillyTavern 用户账号。');
             }
 
             // Scope-bound private inspection reference; no token reaches auth helpers.
@@ -104,7 +104,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 throw new PluginError(
                     400,
                     config.source === 'vertexai' ? 'VERTEX_AUTH_CONFIGURATION_FAILED' : 'GOOGLE_AUTH_CONFIGURATION_FAILED',
-                    'Google authentication is unavailable for this configuration.',
+                    '当前配置无法完成 Google 认证，请检查密钥和认证设置。',
                     { cause: error },
                 );
             }

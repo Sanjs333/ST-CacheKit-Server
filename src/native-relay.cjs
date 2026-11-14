@@ -19,32 +19,32 @@ const OPENAI_SUFFIXES = new Set(['/chat/completions', '/completions', '/response
 
 function unsupported(reason) {
     return new PluginError(503, 'NATIVE_RELAY_UNSUPPORTED',
-        'Final native request capture is unavailable for this configuration.', { details: { reason } });
+        '当前配置无法捕获原生接口的最终请求。', { details: { reason } });
 }
 function authenticatedOwner(request) {
     const key = promptInspectorOwner(request);
-    if (!key) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated profile and data root are required.');
+    if (!key) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录用户账号，并确认用户数据目录可用。');
     return key;
 }
 function validateNativePrepare(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || body.version !== 1 || !SOURCES.has(body.source)
         || Object.keys(body).some(key => !FIELDS.has(key))) {
-        throw new PluginError(400, 'INVALID_NATIVE_PREPARE', 'Invalid native request preparation metadata.');
+        throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生请求的准备信息无效。');
     }
     const config = {};
     for (const key of Object.keys(body)) {
         const descriptor = Object.getOwnPropertyDescriptor(body, key);
-        if (!descriptor || !('value' in descriptor)) throw new PluginError(400, 'INVALID_NATIVE_PREPARE', 'Invalid native request preparation metadata.');
+        if (!descriptor || !('value' in descriptor)) throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生请求的准备信息无效。');
         const value = descriptor.value;
         const unsafeText = key === 'custom_include_headers' ? /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u : /[\x00-\x1f\x7f]/u;
         if (key !== 'version' && (typeof value !== 'string' || value.length > 32_768 || unsafeText.test(value))) {
-            throw new PluginError(400, 'INVALID_NATIVE_PREPARE', 'Invalid native request preparation metadata.');
+            throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生请求的准备信息无效。');
         }
         config[key] = value;
     }
     if (typeof config.model !== 'string' || !config.model || config.model.length > 256 || config.model.trim() !== config.model
         || typeof config.promptInspectorTicket !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(config.promptInspectorTicket)) {
-        throw new PluginError(400, 'INVALID_NATIVE_PREPARE', 'A model and prompt inspector ticket are required.');
+        throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '请求必须包含模型和提示词查看凭证。');
     }
     validateChatId(config.chatId);
     if (config.secret_id && (config.secret_id.length > 256 || config.secret_id.trim() !== config.secret_id)) throw unsupported('INVALID_SECRET_SELECTION');
@@ -86,7 +86,7 @@ function filteredHeaders(headers, privateHop = false) {
 function nativePath(requestUrl) {
     // No normalization that could turn a traversal/extra query into a valid suffix.
     const match = /^\/native-proxy\/([A-Za-z0-9_-]{16,128})(\/chat\/completions|\/completions|\/responses|\/messages)$/u.exec(requestUrl || '');
-    if (!match) throw new PluginError(404, 'INVALID_NATIVE_PROXY_PATH', 'The native proxy path is invalid.');
+    if (!match) throw new PluginError(404, 'INVALID_NATIVE_PROXY_PATH', '原生请求的代理路径无效。');
     return { ticket: match[1], suffix: match[2] };
 }
 function nativeProxySecret(request, data) {
@@ -130,12 +130,12 @@ function createNativeRelay({ ticketStore, promptInspectorStore,
             request.unpipe(); tap?.unpipe(); tap?.destroy();
             upstream?.destroy(); upstreamResponse?.destroy();
         };
-        request.once('error', () => fail(new PluginError(400, 'NATIVE_RELAY_REQUEST_FAILED', 'The native request stream failed.')));
+        request.once('error', () => fail(new PluginError(400, 'NATIVE_RELAY_REQUEST_FAILED', '原生请求数据流读取失败。')));
         request.once('aborted', clientGone);
         response.once('error', clientGone);
         response.once('close', clientGone);
         try {
-            if (request.method !== 'POST') throw new PluginError(405, 'METHOD_NOT_ALLOWED', 'Only POST is accepted by the native relay.');
+            if (request.method !== 'POST') throw new PluginError(405, 'METHOD_NOT_ALLOWED', '原生请求转发仅支持 POST 请求。');
             const { ticket, suffix } = nativePath(request.url);
             // Auth header depends on the source bound to this ticket. A validator
             // sees the data only after the disposable secret is authenticated.
@@ -144,7 +144,7 @@ function createNativeRelay({ ticketStore, promptInspectorStore,
             const suppliedSecret = bearer || request.headers['x-api-key'];
             const data = ticketStore.consume(ticket, suppliedSecret, candidate => {
                 const allowed = candidate.source === 'claude' ? suffix === '/messages' : OPENAI_SUFFIXES.has(suffix);
-                if (!allowed || nativeProxySecret(request, candidate) !== suppliedSecret) throw new PluginError(409, 'NATIVE_PROXY_MISMATCH', 'The native proxy request does not match its ticket.');
+                if (!allowed || nativeProxySecret(request, candidate) !== suppliedSecret) throw new PluginError(409, 'NATIVE_PROXY_MISMATCH', '原生代理请求与其凭证不匹配。');
             });
             const target = new URL(data.targetBase + suffix);
             const headers = filteredHeaders(request.headers, true);
@@ -159,32 +159,32 @@ function createNativeRelay({ ticketStore, promptInspectorStore,
                 if (status >= 300 && status < 400) {
                     // Returning Location lets stock fetch follow it with the
                     // temporary local credential. Reject rather than leak it.
-                    fail(new PluginError(502, 'NATIVE_RELAY_REDIRECT_REJECTED', 'The native relay does not follow upstream redirects.'));
+                    fail(new PluginError(502, 'NATIVE_RELAY_REDIRECT_REJECTED', '原生请求转发不支持上游重定向。'));
                     return;
                 }
                 try { response.writeHead(status, filteredHeaders(incoming.headers)); }
-                catch { fail(new PluginError(502, 'NATIVE_RELAY_RESPONSE_FAILED', 'The native upstream response headers are invalid.')); return; }
-                incoming.once('error', () => fail(new PluginError(502, 'NATIVE_RELAY_RESPONSE_FAILED', 'The native upstream response stream failed.')));
-                incoming.once('aborted', () => fail(new PluginError(502, 'NATIVE_RELAY_RESPONSE_FAILED', 'The native upstream response stream failed.')));
+                catch { fail(new PluginError(502, 'NATIVE_RELAY_RESPONSE_FAILED', '原生接口的上游响应头无效。')); return; }
+                incoming.once('error', () => fail(new PluginError(502, 'NATIVE_RELAY_RESPONSE_FAILED', '原生接口的上游响应流读取失败。')));
+                incoming.once('aborted', () => fail(new PluginError(502, 'NATIVE_RELAY_RESPONSE_FAILED', '原生接口的上游响应流读取失败。')));
                 incoming.once('end', () => { if (!terminal) { terminal = true; finish(undefined, { httpStatus: status }); } });
                 incoming.pipe(response);
             });
-            upstream.once('error', () => fail(new PluginError(502, 'NATIVE_RELAY_UPSTREAM_FAILED', 'The native upstream connection failed.')));
-            upstream.setTimeout?.(upstreamTimeoutMs, () => fail(new PluginError(504, 'NATIVE_RELAY_UPSTREAM_TIMEOUT', 'The native upstream request timed out.')));
+            upstream.once('error', () => fail(new PluginError(502, 'NATIVE_RELAY_UPSTREAM_FAILED', '原生接口的上游连接失败，请检查网络与代理连接。')));
+            upstream.setTimeout?.(upstreamTimeoutMs, () => fail(new PluginError(504, 'NATIVE_RELAY_UPSTREAM_TIMEOUT', '原生接口的上游请求超时，请稍后重试或检查网络与代理连接。')));
             let outgoing = request;
             if (handleRef) {
                 try { tap = new PromptInspectorBodyTap({ store: promptInspectorStore, handle: handleRef }); outgoing = request.pipe(tap); }
                 catch { finish('RAW_BODY_UNAVAILABLE'); }
             }
             outgoing.pipe(upstream);
-        } catch (error) { fail(error instanceof PluginError ? error : new PluginError(502, 'NATIVE_RELAY_UPSTREAM_FAILED', 'The native relay could not forward the request.')); }
+        } catch (error) { fail(error instanceof PluginError ? error : new PluginError(502, 'NATIVE_RELAY_UPSTREAM_FAILED', '原生请求转发失败。')); }
     }
 
     const relay = {
         get available() { return Boolean(server?.listening && baseUrl); },
         get baseUrl() { if (!relay.available) throw unsupported('RELAY_UNAVAILABLE'); return baseUrl; },
         async start() {
-            if (server) throw new Error('Native relay is already running.');
+            if (server) throw new Error('原生请求转发服务已在运行。');
             readinessMarker = randomBytes(32).toString('base64url');
             const created = http.createServer(handle);
             server = created;
@@ -277,7 +277,7 @@ function registerNativeRelayRoutes(router, { stRuntime, nativeTicketStore, nativ
         response.set?.('Cache-Control', 'no-store');
         try {
             const owned = authenticatedOwner(request), ticket = request.query?.ticket;
-            if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/u.test(ticket)) throw new PluginError(400, 'INVALID_NATIVE_TICKET', 'Invalid native relay ticket.');
+            if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/u.test(ticket)) throw new PluginError(400, 'INVALID_NATIVE_TICKET', '原生请求转发凭证无效。');
             const revoked = nativeTicketStore?.revoke(ticket, owned) ?? false;
             return response.json({ ok: true, revoked });
         } catch (error) { return sendExpressError(response, error); }

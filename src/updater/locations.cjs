@@ -61,14 +61,14 @@ function inside(root, target) {
 function resolveWithinHost(rootDir, target) {
     const resolved = path.resolve(target);
     if (!inside(rootDir, resolved) || resolved === rootDir) {
-        throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `Refusing to manage a path outside the update storage root: ${resolved}`);
+        throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `更新目标不在更新存储目录内，无法处理：${resolved}`);
     }
     let cursor = rootDir;
     for (const part of path.relative(rootDir, resolved).split(path.sep)) {
         cursor = path.join(cursor, part);
         try {
             if (fs.lstatSync(cursor).isSymbolicLink()) {
-                throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `Refusing to manage a path through a symlink: ${cursor}`);
+                throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `更新目标路径包含符号链接，无法处理：${cursor}`);
             }
         } catch (error) {
             if (error?.code !== 'ENOENT') throw error;
@@ -108,7 +108,7 @@ function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARG
     const dataRoot = readStringOption(commandLine, 'dataRoot');
     const configPath = readStringOption(commandLine, 'configPath');
     if (!dataRoot || !configPath) {
-        throw new PluginError(500, 'UPDATER_HOST_PATHS_UNAVAILABLE', 'The host has not published its resolved data and configuration paths.');
+        throw new PluginError(500, 'UPDATER_HOST_PATHS_UNAVAILABLE', '酒馆未提供有效的数据目录与配置文件路径。');
     }
     const pluginsPath = readStringOption(commandLine, 'serverPluginsPath') ?? DEFAULT_PLUGINS_PATH;
     const extensionsPath = readStringOption(commandLine, 'globalExtensionsPath') ?? DEFAULT_EXTENSIONS_PATH;
@@ -126,11 +126,11 @@ function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARG
             || !isDirectory(dataRootDirectory) || fs.lstatSync(dataRootDirectory).isSymbolicLink()
             || !inside(dataRootDirectory, pluginsDirectory) || !inside(dataRootDirectory, extensionsDirectory)
             || path.dirname(loadedPlugin) !== pluginsDirectory) {
-            throw new PluginError(500, 'UPDATER_UNSAFE_PATH', 'External plugin directories must share the configured data root and contain the running server plugin.');
+            throw new PluginError(500, 'UPDATER_UNSAFE_PATH', '外部插件目录必须位于配置的数据目录中，并包含正在运行的服务端插件。');
         }
         resolveWithinHost(dataRootDirectory, loadedPlugin);
         if (!serverIdentity(loadedPlugin)) {
-            throw new PluginError(500, 'UPDATER_UNSAFE_PATH', 'The configured storage does not contain the running 提示词缓存优化 server plugin.');
+            throw new PluginError(500, 'UPDATER_UNSAFE_PATH', '配置的存储目录中未找到正在运行的提示词缓存优化服务端插件。');
         }
         updateRoot = dataRootDirectory;
     }
@@ -157,7 +157,7 @@ function assertSafeLayout(directories, targets, backupDirectory) {
         if (protectedPaths.some(protectedPath => inside(target, protectedPath))
             || inside(target, backupRoot) || inside(backupRoot, target)
             || targets.some((other, otherIndex) => otherIndex !== index && inside(target, other))) {
-            throw new PluginError(409, 'UPDATER_UNSAFE_PATH', 'Component directories must not contain host data, active configuration or recovery files, or overlap one another.');
+            throw new PluginError(409, 'UPDATER_UNSAFE_PATH', '组件目录不能包含酒馆数据、当前配置或恢复文件，也不能相互重叠。');
         }
     }
 }

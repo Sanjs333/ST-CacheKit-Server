@@ -52,7 +52,7 @@ function createNativeAuthorizationReader({ readHostSecret, secretKeys, legacySec
         const source = config?.source;
         const keys = { openai: secretKeys.OPENAI, claude: secretKeys.CLAUDE, custom: secretKeys.CUSTOM };
         const unsupported = reason => { throw new PluginError(503, 'NATIVE_RELAY_UNSUPPORTED',
-            'Final native request capture is unavailable for this configuration.', { details: { reason } }); };
+            '当前配置无法捕获原生接口的最终请求。', { details: { reason } }); };
         if (!Object.hasOwn(keys, source) || !keys[source]) unsupported('HOST_SECRET_SOURCE_UNAVAILABLE');
         if (!request?.user?.directories) unsupported('CREDENTIAL_UNAVAILABLE');
         const usesProxy = source !== 'custom' && Boolean(config.reverse_proxy);
@@ -82,11 +82,11 @@ async function loadStRuntime({
     try {
         packageData = JSON.parse(await readFile(path.join(resolvedRoot, 'package.json'), 'utf8'));
     } catch (error) {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'Could not identify the SillyTavern runtime.', { cause: error });
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '无法识别 SillyTavern 运行环境。', { cause: error });
     }
 
     if (!isSupportedHost(packageData)) {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'This plugin requires SillyTavern 1.14.0 or newer with compatible Google/secret interfaces, or a compatible Luker runtime.');
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '此插件需要 SillyTavern 1.14.0 或更高版本及兼容的 Google 与密钥接口，或兼容的 Luker 运行环境。');
     }
 
     const googleModuleUrl = pathToFileURL(path.join(resolvedRoot, 'src', 'endpoints', 'google.js')).href;
@@ -94,10 +94,10 @@ async function loadStRuntime({
     try {
         googleModule = await importModule(googleModuleUrl);
     } catch (error) {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'Could not load the host\'s Vertex AI runtime.', { cause: error });
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '无法加载酒馆的 Vertex AI 运行接口。', { cause: error });
     }
     if (typeof googleModule.getGoogleApiConfig !== 'function') {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'The host does not export the required Vertex AI configuration helper.');
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆缺少所需的 Vertex AI 配置接口。');
     }
 
     const secretsModuleUrl = pathToFileURL(path.join(resolvedRoot, 'src', 'endpoints', 'secrets.js')).href;
@@ -105,10 +105,10 @@ async function loadStRuntime({
     try {
         secretsModule = await importModule(secretsModuleUrl);
     } catch (error) {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'Could not load the host\'s secret manager.', { cause: error });
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '无法加载酒馆的密钥管理器。', { cause: error });
     }
     if (typeof secretsModule.readSecret !== 'function' || !secretsModule.SECRET_KEYS) {
-        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'The host does not export the required secret manager.');
+        throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆缺少所需的密钥管理接口。');
     }
 
     const legacySecretSelection = packageData.name === 'sillytavern' && !isAtLeastVersion(packageData.version, [1, 16, 0]);
@@ -136,14 +136,14 @@ async function loadStRuntime({
             const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
             const baseUrl = `https://${host}/v1`;
             if (!directories) {
-                const error = new Error('An authenticated user is required for explicit secret selection.');
+                const error = new Error('指定密钥前请先登录用户账号。');
                 error.code = 'EXPLICIT_SECRET_UNAVAILABLE';
                 throw error;
             }
             if (authMode === 'express') {
                 const apiKey = readHostSecret(directories, secretsModule.SECRET_KEYS.VERTEXAI, secretId);
                 if (typeof apiKey !== 'string' || !apiKey) {
-                    const error = new Error('The requested Vertex AI Express secret was not found.');
+                    const error = new Error('未找到所选的 Vertex AI Express 密钥。');
                     error.code = 'EXPLICIT_SECRET_NOT_FOUND';
                     throw error;
                 }
@@ -157,13 +157,13 @@ async function loadStRuntime({
             if (authMode === 'full') {
                 const requiredHelpers = ['generateJWTToken', 'getAccessToken', 'getProjectIdFromServiceAccount'];
                 if (requiredHelpers.some(name => typeof googleModule[name] !== 'function')) {
-                    const error = new Error('This host cannot authenticate an explicitly selected Vertex AI service account.');
+                    const error = new Error('当前酒馆无法使用指定的 Vertex AI 服务账号完成认证。');
                     error.code = 'EXPLICIT_SECRET_UNSUPPORTED';
                     throw error;
                 }
                 const serialized = readHostSecret(directories, secretsModule.SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT, secretId);
                 if (typeof serialized !== 'string' || !serialized) {
-                    const error = new Error('The requested Vertex AI service account was not found.');
+                    const error = new Error('未找到所选的 Vertex AI 服务账号。');
                     error.code = 'EXPLICIT_SECRET_NOT_FOUND';
                     throw error;
                 }
@@ -178,25 +178,25 @@ async function loadStRuntime({
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
                     };
                 } catch (cause) {
-                    const error = new Error('The selected Vertex AI service account could not be authenticated.', { cause });
+                    const error = new Error('所选 Vertex AI 服务账号认证失败。', { cause });
                     error.code = 'EXPLICIT_SECRET_UNAVAILABLE';
                     throw error;
                 }
             }
-            const error = new Error('Explicit secret selection is unsupported for this Vertex AI authentication mode.');
+            const error = new Error('当前 Vertex AI 认证方式不支持指定密钥。');
             error.code = 'EXPLICIT_SECRET_UNSUPPORTED';
             throw error;
         }
 
         const directories = request?.user?.directories;
         if (!directories) {
-            const error = new Error('An authenticated user is required for explicit secret selection.');
+            const error = new Error('指定密钥前请先登录用户账号。');
             error.code = 'EXPLICIT_SECRET_UNAVAILABLE';
             throw error;
         }
         const apiKey = readHostSecret(directories, secretsModule.SECRET_KEYS.MAKERSUITE, secretId);
         if (typeof apiKey !== 'string' || !apiKey) {
-            const error = new Error('The requested Google AI Studio secret was not found.');
+            const error = new Error('未找到所选的 Google AI Studio 密钥。');
             error.code = 'EXPLICIT_SECRET_NOT_FOUND';
             throw error;
         }
@@ -219,7 +219,7 @@ async function loadStRuntime({
                 throw new Error('Missing native Gemini helpers');
             }
             return { postProcessPrompt: converters.postProcessPrompt, convertGooglePrompt: converters.convertGooglePrompt, GEMINI_SAFETY: constants.GEMINI_SAFETY, VERTEX_SAFETY: constants.VERTEX_SAFETY };
-        }).catch(() => { nativeGeminiHelpers = undefined; throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'The host native Gemini converter is unavailable.'); });
+        }).catch(() => { nativeGeminiHelpers = undefined; throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆的 Gemini 原生请求转换接口不可用。'); });
         return nativeGeminiHelpers;
     };
 

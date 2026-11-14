@@ -36,7 +36,7 @@ function loadVendoredGit() {
     if (cachedBundle === undefined) {
         const bundle = require(BUNDLE_PATH);
         if (!bundle?.git || !bundle?.http) {
-            throw new PluginError(500, 'UPDATER_VENDOR_UNAVAILABLE', 'The bundled Git implementation is missing or incomplete.');
+            throw new PluginError(500, 'UPDATER_VENDOR_UNAVAILABLE', '插件内置的 Git 组件缺失或不完整。');
         }
         cachedBundle = bundle;
     }
@@ -50,7 +50,7 @@ function isNotFound(error) {
 function gitFailure(action, error) {
     if (error instanceof PluginError) return error;
     const message = typeof error?.message === 'string' && error.message.length > 0 ? error.message : String(error);
-    return new PluginError(502, 'UPDATER_GIT_FAILED', `Git ${action} failed: ${message}`, { cause: error });
+    return new PluginError(502, 'UPDATER_GIT_FAILED', `Git ${action} 操作失败：${message}`, { cause: error });
 }
 
 function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {}) {
@@ -107,7 +107,7 @@ function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {
             return record;
         } catch (error) {
             if (error?.code === 'ENOENT') return null;
-            throw new PluginError(409, 'UPDATER_INVALID_METADATA', 'The PayGo updater metadata could not be read as a JSON object.', { cause: error });
+            throw new PluginError(409, 'UPDATER_INVALID_METADATA', '无法将插件更新记录读取为 JSON 对象。', { cause: error });
         }
     }
 
@@ -179,7 +179,7 @@ function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {
             // so the next check and the command-line installer see that channel.
             await git.checkout({ fs: fsModule, dir: directory, ref: branch ?? oid, force: true, cache: freshCache() });
             const checkedOut = await git.resolveRef({ fs: fsModule, dir: directory, ref: 'HEAD', cache: freshCache() });
-            if (checkedOut !== oid) throw new Error('The prepared checkout does not match the selected revision.');
+            if (checkedOut !== oid) throw new Error('准备的代码副本与所选版本不匹配。');
         } catch (error) {
             throw gitFailure('staged checkout', error);
         }
