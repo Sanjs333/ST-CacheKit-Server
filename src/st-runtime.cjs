@@ -13,6 +13,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { PluginError } = require('./errors.cjs');
 const { createHostSecretReader } = require('./host-secrets.cjs');
+const { getVertexApiHostname, normalizeVertexApiUrl } = require('./vertex-endpoint.cjs');
 
 const MINIMUM_SILLYTAVERN_VERSION = Object.freeze([1, 14, 0]);
 
@@ -126,14 +127,21 @@ async function loadStRuntime({
         const rawSecretId = request?.body?.secret_id ?? request?.body?.secretId;
         const secretId = typeof rawSecretId === 'string' ? rawSecretId.trim() : '';
         if (!secretId) {
-            return googleModule.getGoogleApiConfig(request, model, endpoint);
+            const config = await googleModule.getGoogleApiConfig(request, model, endpoint);
+            const region = request?.body?.vertexai_region;
+            if (request?.body?.api !== 'vertexai' || (region !== 'us' && region !== 'eu')) return config;
+            return {
+                ...config,
+                url: normalizeVertexApiUrl(config.url, region),
+                ...(typeof config.baseUrl === 'string' ? { baseUrl: normalizeVertexApiUrl(config.baseUrl, region) } : {}),
+            };
         }
 
         if (request?.body?.api === 'vertexai') {
             const directories = request?.user?.directories;
             const authMode = request.body.vertexai_auth_mode;
             const region = request.body.vertexai_region;
-            const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
+            const host = getVertexApiHostname(region);
             const baseUrl = `https://${host}/v1`;
             if (!directories) {
                 const error = new Error('指定密钥前请先登录用户账号。');

@@ -10,6 +10,7 @@
 
 const { PluginError } = require('./errors.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
+const { getVertexApiHostname } = require('./vertex-endpoint.cjs');
 
 const ALLOWED_GOOGLE_HEADERS = new Set(['content-type', 'authorization', 'x-goog-api-key']);
 
@@ -38,9 +39,7 @@ function parseAndValidateGoogleTarget(rawUrl, { model, region, stream, source = 
             throw new PluginError(500, 'UNSAFE_GOOGLE_TARGET', '保存的 AI Studio 代理基础地址校验失败。');
         }
     }
-    const expectedHost = aiStudio ? 'generativelanguage.googleapis.com' : region === 'global'
-        ? 'aiplatform.googleapis.com'
-        : `${region}-aiplatform.googleapis.com`;
+    const expectedHost = aiStudio ? 'generativelanguage.googleapis.com' : getVertexApiHostname(region);
     const endpoint = stream ? 'streamGenerateContent' : 'generateContent';
     const expectedPath = aiStudio ? new RegExp(
         `^${proxyBase ? escapeRegularExpression(proxyBase.pathname.replace(/\/+$/u, '')) : ''}/v1(?:beta|alpha)?/models/${escapeRegularExpression(model)}:${endpoint}$`, 'u',
