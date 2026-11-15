@@ -11,6 +11,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { PluginError } = require('./errors.cjs');
+const { sanitizeGoogleErrorMessage, sanitizeGoogleErrorDetails } = require('./google-errors.cjs');
 
 const LOG_FILE_NAME = 'st-vertex-paygo.log';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -72,7 +73,7 @@ function sanitizeServerDetails(details) {
     const sanitized = {};
     for (const [key, value] of Object.entries(details).slice(0, MAX_DETAIL_KEYS)) {
         if (!DETAIL_KEY_PATTERN.test(key) || SENSITIVE_DETAIL_KEY_PATTERN.test(key)) continue;
-        const primitive = validateLogPrimitive(value);
+        const primitive = key === 'upstreamMessage' ? sanitizeGoogleErrorMessage(value) : validateLogPrimitive(value);
         if (primitive !== undefined) sanitized[key] = primitive;
     }
     return Object.keys(sanitized).length > 0 ? sanitized : undefined;
@@ -131,6 +132,9 @@ function describeError(error) {
     }
     if (Number.isSafeInteger(error?.status) && error.status >= 100 && error.status <= 599) {
         details.statusCode = error.status;
+    }
+    if (error instanceof PluginError && error.code === 'GEMINI4_UPSTREAM_HTTP_ERROR') {
+        Object.assign(details, sanitizeGoogleErrorDetails(error.details));
     }
     return details;
 }

@@ -5,19 +5,17 @@ const { PluginError, asPluginError, errorPayload } = require('./errors.cjs');
 const { sanitizeUsage } = require('./usage-capture.cjs');
 const { validatePreparedGoogleTarget } = require('./target-policy.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
+const { MAX_GOOGLE_ERROR_BYTES, googleErrorDetails, parseGoogleError } = require('./google-errors.cjs');
 
 const protocolError = (code, message) => new PluginError(502, code, message);
-const MAX_ERROR_BYTES = 64 * 1024;
-const redact = text => text.replace(/AIza[0-9A-Za-z_-]{35}/gu, '[redacted]').replace(/ya29\.[0-9A-Za-z._-]+/gu, '[redacted]');
 // Google's error message is the only actionable diagnosis (free tier, region,
 // invalid argument); keep it bounded and without credentials.
 function googleFailure(status, error, prefix = `Google 上游返回 HTTP ${status}`) {
-    const upstreamMessage = typeof error?.message === 'string'
-        ? redact(error.message).replace(/\s+/gu, ' ').trim().slice(0, 500) : '';
-    const googleStatus = typeof error?.status === 'string' && /^[A-Z_]{1,64}$/u.test(error.status) ? error.status : undefined;
+    const details = googleErrorDetails(status, error);
+    const { upstreamMessage, googleStatus, googleReason } = details;
     return new PluginError(status >= 400 && status <= 599 ? status : 502, 'GEMINI4_UPSTREAM_HTTP_ERROR',
-        `${prefix}${googleStatus ? ` ${googleStatus}` : ''}${upstreamMessage ? `: ${upstreamMessage}` : '.'}`,
-        { details: { upstreamStatus: status, ...(googleStatus ? { googleStatus } : {}), ...(upstreamMessage ? { upstreamMessage } : {}) } });
+        `${prefix}${googleStatus ? ` ${googleStatus}` : ''}${googleReason ? ` (${googleReason})` : ''}${upstreamMessage ? `: ${upstreamMessage}` : '.'}`,
+        { details });
 }
 async function readGoogleError(incoming) {
     const chunks = [];
@@ -25,15 +23,12 @@ async function readGoogleError(incoming) {
     try {
         for await (const chunk of incoming) {
             size += chunk.length;
-            if (size > MAX_ERROR_BYTES) break;
+            if (size > MAX_GOOGLE_ERROR_BYTES) break;
             chunks.push(chunk);
         }
     } catch { /* Report whatever arrived. */ }
     incoming.destroy();
-    try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        return (Array.isArray(parsed) ? parsed[0] : parsed)?.error;
-    } catch { return undefined; }
+    return parseGoogleError(Buffer.concat(chunks));
 }
 function addUsage(total, usage) {
     const result = { ...(total || {}) };

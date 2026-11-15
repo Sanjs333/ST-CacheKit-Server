@@ -24,8 +24,6 @@ cd SillyTavern && ((Get-Content config.yaml -Encoding utf8) -replace 'enableServ
 
 Google 认证沿用酒馆现有设置。缓存命中以 Google 返回用量为准，费用为估算。
 
-## 开发验证
-
-在本目录运行 `npm test`，验证账本并发加载、请求查询、分页快照、记录恢复，以及账本异常或连接断开时的生成准备流程。修改后端后需重启酒馆才能生效。
+修改后端后需重启酒馆才能生效。
 
 基于 [Mana Nekoha 的 ST-Vertex-PayGo-Server](https://github.com/mananekoha114/ST-Vertex-PayGo-Server) 修改，采用 [MPL-2.0](LICENSE)。第三方依赖声明见 [vendor/THIRD_PARTY_NOTICES.txt](vendor/THIRD_PARTY_NOTICES.txt)。

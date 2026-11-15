@@ -18,6 +18,7 @@ const { UsageCapture } = require('./usage-capture.cjs');
 const { PromptInspectorBodyTap } = require('./prompt-inspector-tap.cjs');
 const { GoogleRequestPreviewTap } = require('./google-request-preview.cjs');
 const { isGemini4Model, runGemini4Transport } = require('./gemini4-transport.cjs');
+const { MAX_GOOGLE_ERROR_BYTES, googleErrorDetails, parseGoogleError } = require('./google-errors.cjs');
 
 const HOP_BY_HOP_HEADERS = new Set([
     'connection',
@@ -320,13 +321,25 @@ function createProxyHandler({
                 logStore?.server(statusCode >= 400 ? 'warn' : 'info', 'proxy_upstream_response', makeLogContext({ statusCode }));
                 const encoding = upstreamResponse.headers?.['content-encoding'];
                 const compressed = Boolean(encoding && String(encoding).toLowerCase() !== 'identity');
+                let errorDetails = statusCode >= 400 ? googleErrorDetails(statusCode) : undefined;
+                let errorChunks = errorDetails && !compressed ? [] : null;
+                let errorBytes = 0;
                 if (!compressed) {
                     usageCapture = new UsageCapture({ stream: ticketData.stream });
                     upstreamResponse.on('data', chunk => {
                         try { usageCapture.write(chunk); } catch { /* Usage capture is observational. */ }
+                        if (errorChunks) {
+                            errorBytes += chunk.length;
+                            if (errorBytes <= MAX_GOOGLE_ERROR_BYTES) errorChunks.push(chunk);
+                            else errorChunks = null;
+                        }
                     });
                 }
                 upstreamResponse.once('end', () => {
+                    if (errorChunks) {
+                        errorDetails = googleErrorDetails(statusCode, parseGoogleError(Buffer.concat(errorChunks)));
+                        errorChunks = null;
+                    }
                     finishInspection(statusCode >= 400 ? `UPSTREAM_HTTP_${statusCode}` : undefined, { httpStatus: statusCode });
                     const usage = usageCapture?.finish() || null;
                     if (statusCode >= 400) finalizeUsage('failed', `UPSTREAM_HTTP_${statusCode}`, usage);
@@ -343,7 +356,7 @@ function createProxyHandler({
                     response.destroy();
                 });
                 response.once('finish', () => {
-                    logTerminal(statusCode >= 400 ? 'warn' : 'info', 'proxy_completed', { statusCode });
+                    logTerminal(statusCode >= 400 ? 'warn' : 'info', 'proxy_completed', { statusCode, ...errorDetails });
                 });
                 upstreamResponse.pipe(response);
             });
