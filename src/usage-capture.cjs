@@ -34,7 +34,12 @@ function sanitizeUsage(value) {
         if (details) usage[field] = details;
     }
     if (typeof value.trafficType === 'string' && value.trafficType.length <= 64) usage.trafficType = value.trafficType;
-    return Object.keys(usage).length ? usage : null;
+    if (!Object.keys(usage).length) return null;
+    // Keep provenance before finish() supplies zero for cost estimation.
+    // A missing or malformed upstream field must not become a confirmed miss.
+    usage.cacheCountStatus = value.cachedContentTokenCount == null ? 'omitted'
+        : Number.isSafeInteger(value.cachedContentTokenCount) && value.cachedContentTokenCount >= 0 ? 'reported' : 'invalid';
+    return usage;
 }
 
 function usageFromJson(value) {
@@ -152,7 +157,11 @@ class UsageCapture {
 
     #merge(usage) {
         if (usage) {
-            this.usage = { ...(this.usage || {}), ...usage };
+            const previous = this.usage?.cacheCountStatus;
+            const next = usage.cacheCountStatus;
+            const cacheCountStatus = previous === 'invalid' || next === 'invalid' ? 'invalid'
+                : previous === 'reported' || next === 'reported' ? 'reported' : 'omitted';
+            this.usage = { ...(this.usage || {}), ...usage, cacheCountStatus };
             this.limitExceeded = false;
         }
     }

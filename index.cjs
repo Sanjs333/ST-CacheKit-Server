@@ -37,7 +37,7 @@ async function init(router) {
     let loopbackTransport;
     let nativeTicketStore;
     let nativeRelay;
-    const usageStore = new UsageStore();
+    const usageStore = new UsageStore({ onCleanupError: error => logStore.server('warn', 'usage_ledger_cleanup_failed', describeError(error)) });
     const promptInspectorStore = new PromptInspectorStore({ getCapability: () => nativeRelay?.available === true });
     try {
         const stRuntime = await loadStRuntime();
@@ -78,6 +78,7 @@ async function init(router) {
         } catch (cleanupError) {
             logStore.server('error', 'plugin_initialization_cleanup_failed', describeError(cleanupError));
         } finally {
+            await usageStore.close();
             logStore.close();
         }
         throw error;
@@ -100,6 +101,7 @@ async function exit() {
         state.logStore.server('error', 'plugin_shutdown_failed', describeError(error));
         throw error;
     } finally {
+        await state.usageStore.close();
         state.logStore.close();
     }
 }

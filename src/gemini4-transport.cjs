@@ -33,7 +33,11 @@ async function readGoogleError(incoming) {
 function addUsage(total, usage) {
     const result = { ...(total || {}) };
     for (const [key, value] of Object.entries(sanitizeUsage(usage) || {})) {
-        if (typeof value === 'number') result[key] = (result[key] || 0) + value;
+        if (key === 'cacheCountStatus') {
+            const previous = result[key];
+            result[key] = previous === undefined || previous === value ? value
+                : previous === 'invalid' || value === 'invalid' ? 'invalid' : 'mixed';
+        } else if (typeof value === 'number') result[key] = (result[key] || 0) + value;
         else if (Array.isArray(value)) {
             const items = new Map((result[key] || []).map(item => [item.modality, { ...item }]));
             for (const item of value) {

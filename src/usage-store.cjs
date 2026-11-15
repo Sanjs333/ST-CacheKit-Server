@@ -9,6 +9,7 @@ const { summarizeGoogleRequest, MAX_STORED_GOOGLE_REQUESTS } = require('./google
 
 const STORE_DIRECTORY = 'vertex-paygo';
 const STORE_FILE = 'usage-ledger.jsonl';
+const MAX_USAGE_RECORDS_PER_CHAT = 100;
 
 function ledgerPathForUser(user) {
     const root = user?.directories?.root;
@@ -21,7 +22,7 @@ function clone(value) {
 }
 
 function parseLimit(value) {
-    if (value === undefined || value === null || value === '') return 200;
+    if (value === undefined || value === null || value === '') return MAX_USAGE_RECORDS_PER_CHAT;
     const parsed = Number(value);
     return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 500 ? parsed : null;
 }
@@ -82,10 +83,16 @@ class UsageStore {
     #previewKey;
     #previewEpoch;
     #wireSequences = new Map();
-    constructor({ fsModule = fs, now = () => Date.now(), pendingTimeoutMs = 35 * 60_000 } = {}) {
+    #dirtyFiles = new Set();
+    #cleanupTimers = new Map();
+    #closed = false;
+    constructor({ fsModule = fs, now = () => Date.now(), pendingTimeoutMs = 35 * 60_000,
+        cleanupDelayMs = 500, onCleanupError = error => console.warn('[提示词缓存优化] 费用账本自动清理失败。', error) } = {}) {
         this.fs = fsModule;
         this.now = now;
         this.pendingTimeoutMs = pendingTimeoutMs;
+        this.cleanupDelayMs = cleanupDelayMs;
+        this.onCleanupError = onCleanupError;
         this.activeIds = new Set();
         this.recoveredFiles = new Set();
         this.indexes = new Map();
@@ -108,6 +115,53 @@ class UsageStore {
             this.readyDirectories.add(directory);
         }
         this.fs.appendFileSync(file, records.map(record => `${JSON.stringify(record)}\n`).join(''), { encoding: 'utf8', mode: 0o600 });
+        this.#scheduleCleanup(file);
+    }
+
+    #scheduleCleanup(file) {
+        this.#dirtyFiles.add(file);
+        if (this.#closed || this.loading.has(file) || this.#cleanupTimers.has(file)) return;
+        const timer = setTimeout(() => {
+            this.#cleanupTimers.delete(file);
+            this.#compact(file);
+        }, this.cleanupDelayMs);
+        timer.unref?.();
+        this.#cleanupTimers.set(file, timer);
+    }
+
+    #compact(file) {
+        if (!this.#dirtyFiles.has(file)) return true;
+        const records = this.indexes.get(file);
+        if (!records || this.loading.has(file)) return false;
+        const target = path.resolve(file);
+        const temporary = path.join(path.dirname(target), `.${STORE_FILE}.${randomUUID()}.tmp`);
+        let descriptor;
+        try {
+            // Keep the original file intact until the complete replacement is
+            // ready. Both paths are files in this user's ledger directory.
+            descriptor = this.fs.openSync(temporary, 'wx', 0o600);
+            let batch = [];
+            for (const record of records.values()) {
+                batch.push(`${JSON.stringify(record)}\n`);
+                if (batch.length === 100) {
+                    this.fs.writeFileSync(descriptor, batch.join(''), { encoding: 'utf8' });
+                    batch = [];
+                }
+            }
+            if (batch.length) this.fs.writeFileSync(descriptor, batch.join(''), { encoding: 'utf8' });
+            this.fs.fsyncSync(descriptor);
+            this.fs.closeSync(descriptor); descriptor = undefined;
+            this.fs.renameSync(temporary, target);
+            this.#dirtyFiles.delete(file);
+            return true;
+        } catch (error) {
+            try { this.onCleanupError(error); } catch { /* Cleanup reporting cannot affect generation. */ }
+            // A later read or write retries cleanup; never truncate the original.
+            return false;
+        } finally {
+            if (descriptor !== undefined) try { this.fs.closeSync(descriptor); } catch {}
+            try { this.fs.unlinkSync(temporary); } catch {}
+        }
     }
 
     #index(file, record) {
@@ -130,23 +184,34 @@ class UsageStore {
         records.set(record.id, record);
         if (record.status === 'pending') pending.set(record.id, record);
         else pending.delete(record.id);
+        if (chat.records.length > MAX_USAGE_RECORDS_PER_CHAT) {
+            const expired = chat.records.splice(0, chat.records.length - MAX_USAGE_RECORDS_PER_CHAT);
+            chat.positions = new Map(chat.records.map((value, index) => [value.id, index]));
+            for (const old of expired) {
+                records.delete(old.id); pending.delete(old.id); this.activeIds.delete(old.id);
+            }
+            this.#scheduleCleanup(file);
+        }
     }
 
     // Production routes await this once per user. Stream large ledgers instead
     // of reading/splitting/parsing the whole file on the host's event loop.
     async ensureLoaded(user) {
+        if (this.#closed) return;
         const file = ledgerPathForUser(user);
         if (!file) return;
         if (this.loading.has(file)) return this.loading.get(file);
         if (this.indexes.has(file)) return;
         const task = (async () => {
             const records = new Map();
+            let linesSeen = 0;
             try {
                 const input = this.fs.createReadStream(file, { encoding: 'utf8' });
                 const lines = createInterface({ input, crlfDelay: Infinity });
                 let count = 0;
                 try {
                     for await (const line of lines) {
+                        linesSeen++;
                         try { const record = JSON.parse(line); if (record && typeof record.id === 'string') records.set(record.id, record); }
                         catch { /* A partial final JSONL row does not erase earlier usage. */ }
                         if (++count % 1000 === 0) await yieldToServer();
@@ -161,9 +226,13 @@ class UsageStore {
                 this.#index(file, record);
                 if (++count % 1000 === 0) await yieldToServer();
             }
+            if (linesSeen > this.indexes.get(file).size) this.#scheduleCleanup(file);
         })();
         this.loading.set(file, task);
-        try { await task; } finally { if (this.loading.get(file) === task) this.loading.delete(file); }
+        try { await task; } finally {
+            if (this.loading.get(file) === task) this.loading.delete(file);
+            if (this.#dirtyFiles.has(file)) this.#scheduleCleanup(file);
+        }
     }
 
     #read(file) {
@@ -179,8 +248,10 @@ class UsageStore {
             throw error;
         }
         const records = new Map();
+        let linesSeen = 0;
         for (const line of text.split('\n')) {
             if (!line) continue;
+            linesSeen++;
             try {
                 const record = JSON.parse(line);
                 if (record && typeof record.id === 'string') records.set(record.id, record);
@@ -188,6 +259,7 @@ class UsageStore {
         }
         for (const record of records.values()) this.#index(file, record);
         if (!this.indexes.has(file)) this.indexes.set(file, new Map());
+        if (linesSeen > this.indexes.get(file).size) this.#scheduleCleanup(file);
         return this.indexes.get(file);
     }
 
@@ -212,9 +284,11 @@ class UsageStore {
             }
         }
         flush(); this.recoveredFiles.add(file);
+        if (this.#dirtyFiles.has(file)) this.#scheduleCleanup(file);
     }
 
     create(user, details) {
+        if (this.#closed) return null;
         const file = ledgerPathForUser(user);
         if (!file || !details.chatId) return null;
         this.#recover(file);
@@ -230,7 +304,7 @@ class UsageStore {
     }
 
     update(reference, patch) {
-        if (!reference?.file || !reference?.id) return;
+        if (this.#closed || !reference?.file || !reference?.id) return;
         this.#recover(reference.file);
         const record = this.indexes.get(reference.file)?.get(reference.id);
         if (!record || record.status !== 'pending' || !this.activeIds.has(record.id)) return;
@@ -245,7 +319,7 @@ class UsageStore {
     }
 
     captureGoogleRequest(reference, bytes, options, worldInfoOrder) {
-        if (!reference?.file || !reference?.id) return;
+        if (this.#closed || !reference?.file || !reference?.id) return;
         const record = this.#read(reference.file).get(reference.id);
         if (!record) return;
         // Per-process, per-user keyed digests cannot be used as public prompt
@@ -272,6 +346,7 @@ class UsageStore {
     }
 
     listLatest(user, chatId, limit = 12) {
+        if (this.#closed) return null;
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) return null;
         const file = ledgerPathForUser(user);
         if (!file) return null;
@@ -281,6 +356,7 @@ class UsageStore {
     }
 
     listByIds(user, chatId, ids, { includeRequestPreviews = false } = {}) {
+        if (this.#closed) return null;
         const file = ledgerPathForUser(user);
         if (!file) return null;
         this.#recover(file);
@@ -295,6 +371,7 @@ class UsageStore {
     }
 
     list(user, chatId, options = undefined) {
+        if (this.#closed) return null;
         const file = ledgerPathForUser(user);
         if (!file) return null;
         this.#recover(file);
@@ -315,6 +392,22 @@ class UsageStore {
             ...(truncated ? { nextCursor: encodeCursor(nextOffset, snapshot), truncated: true } : {}),
         };
     }
+
+    flush() {
+        for (const timer of this.#cleanupTimers.values()) clearTimeout(timer);
+        this.#cleanupTimers.clear();
+        let complete = true;
+        for (const file of this.#dirtyFiles) if (!this.#compact(file)) complete = false;
+        return complete;
+    }
+
+    async close() {
+        this.#closed = true;
+        for (const timer of this.#cleanupTimers.values()) clearTimeout(timer);
+        this.#cleanupTimers.clear();
+        await Promise.allSettled(this.loading.values());
+        this.flush();
+    }
 }
 
-module.exports = { STORE_DIRECTORY, STORE_FILE, UsageStore, ledgerPathForUser, summarizeWorldInfoOrder };
+module.exports = { STORE_DIRECTORY, STORE_FILE, MAX_USAGE_RECORDS_PER_CHAT, UsageStore, ledgerPathForUser, summarizeWorldInfoOrder };
