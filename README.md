@@ -2,6 +2,8 @@
 
 [提示词缓存优化](https://github.com/Sanjs333/ST-CacheKit) 的配套后端，提供请求转发、用量记录与提示词记录。
 
+支持 Gemini 4 Hydrogen / Carbon / Argon 的原生请求和续传。Hydrogen 的最大思考强度对应 xhigh；Vertex Gemini 4 使用 Standard，AI Studio 可使用 Standard / Flex。
+
 ## 后端安装
 
 先停止酒馆，按实际安装位置修改命令中的路径。TauriTavern 无需安装后端。

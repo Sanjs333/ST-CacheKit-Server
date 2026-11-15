@@ -8,7 +8,7 @@
 
 'use strict';
 
-const GEMINI4_MODELS = Object.freeze(['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-argon-cyber-permissive']);
+const GEMINI4_MODELS = Object.freeze(['gemini-4-hydrogen', 'gemini-4-carbon', 'gemini-4-argon', 'gemini-4-argon-cyber-permissive']);
 const isGemini4Model = model => GEMINI4_MODELS.includes(model);
 
 module.exports = { GEMINI4_MODELS, isGemini4Model };

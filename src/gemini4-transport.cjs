@@ -175,9 +175,10 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
             const measurable = Number.isSafeInteger(hopCount) && hopCount >= 0 && Number.isSafeInteger(thoughtCount) && thoughtCount >= 0;
             if (measurable) spent += hopCount + thoughtCount;
             // MAX_TOKENS is a user cap, never permission to buy another output budget.
-            // AI Studio reports its per-request cap as MAX_TOKENS with a token;
-            // resume only while the measured total stays below the user's budget.
+            // Keep the legacy AI Studio per-hop fallback for existing models.
+            // Hydrogen resumes only on CONTINUATION; MAX_TOKENS is terminal.
             const perRequestCap = reason === 'MAX_TOKENS' && latestToken && ticketData.source === 'makersuite'
+                && ticketData.model !== 'gemini-4-hydrogen'
                 && bounded && measurable && spent < budget;
             if (reason === 'CONTINUATION' || perRequestCap) {
                 if (!latestToken) throw protocolError('GEMINI4_CONTINUATION_TOKEN_MISSING', 'Google 续传响应缺少续传令牌。');

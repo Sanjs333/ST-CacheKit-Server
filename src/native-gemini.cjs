@@ -147,7 +147,9 @@ async function buildNativeGeminiBody(input, runtime) {
     });
     if (input.continue_prefill || prompt.contents.at(-1)?.role === 'model') prompt.contents.push({ role: 'user', parts: [{ text: 'Continue the previous assistant response from where it stopped, without repeating previous content.' }] });
     const thinkingConfig = { includeThoughts: Boolean(input.include_reasoning) };
-    const level = { min: 'LOW', minimal: 'LOW', low: 'LOW', medium: 'MEDIUM', high: 'HIGH', max: 'HIGH' }[String(input.reasoning_effort).toLowerCase()];
+    const effort = String(input.reasoning_effort).toLowerCase();
+    const level = input.model === 'gemini-4-hydrogen' && ['max', 'xhigh'].includes(effort)
+        ? 'XHIGH' : { min: 'LOW', minimal: 'LOW', low: 'LOW', medium: 'MEDIUM', high: 'HIGH', max: 'HIGH' }[effort];
     if (level) thinkingConfig.thinkingLevel = level;
     const generationConfig = { maxOutputTokens: input.max_tokens, thinkingConfig };
     if (Array.isArray(input.stop) && input.stop.length) generationConfig.stopSequences = input.stop;
