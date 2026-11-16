@@ -299,6 +299,7 @@ class UsageStore {
             id: randomUUID(), chatId: details.chatId, createdAt: new Date(this.now()).toISOString(),
             model: details.model, source: details.source, tier: details.tier, region: details.region,
             stream: details.stream, status: 'pending', usage: null, price: clone(details.price),
+            ...(details.cacheWarm === true ? { cacheWarm: true } : {}),
         };
         this.#append(file, record);
         this.#index(file, record);

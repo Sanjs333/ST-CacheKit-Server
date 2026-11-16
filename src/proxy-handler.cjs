@@ -285,11 +285,13 @@ function createProxyHandler({
                 runGemini4Transport({
                     request, response, ticketData, target, upstreamRequest,
                     maxBodyBytes, upstreamTimeoutMs,
+                    ...(ticketData.cacheWarm === true ? { maxHops: 1 } : {}),
                     onRequest: (bytes, info) => {
                         // Each Gemini4 continuation is a separate final dispatch.
                         finishInspection(undefined, { httpStatus: 200 });
                         inspectorDispatch = beginInspection({ transport: 'google-gemini4', tier: ticketData.tier, region: ticketData.region, stream: ticketData.stream,
-                            cacheBoundaryStatus: info?.cacheBoundaryStatus, cacheBoundaryStableTextChars: info?.cacheBoundaryStableTextChars });
+                            cacheBoundaryStatus: info?.cacheBoundaryStatus, cacheBoundaryStableTextChars: info?.cacheBoundaryStableTextChars,
+                            ...(ticketData.cacheWarm === true ? { cacheWarm: true } : {}) });
                         try { promptInspectorStore?.captureGoogleBody(inspectorDispatch, bytes); } catch {}
                         try { usageStore?.captureGoogleRequest?.(usageReference, bytes, info, ticketData.worldInfoOrder); }
                         catch { logStore?.server('warn', 'request_preview_capture_failed', makeLogContext(), { priority: 'low' }); }

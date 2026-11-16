@@ -13,7 +13,7 @@ const { isGemini4Model } = require('./gemini4-models.cjs');
 
 const PROTOCOL_VERSION = 2;
 const PLUGIN_ID = 'vertex-paygo';
-const PLUGIN_VERSION = '1.1.2';
+const PLUGIN_VERSION = '1.1.3';
 const COMPATIBLE_ST_RANGE = '>=1.14.0';
 const TIERS = Object.freeze(['standard', 'flex']);
 const AUTH_MODES = Object.freeze(['express', 'full']);
@@ -164,6 +164,11 @@ function validatePreparePayload(body) {
         ? undefined : validateChatId(body.usageChatId);
     const usagePrice = validateUsagePrice(body.usagePrice);
     const worldInfoOrder = validateWorldInfoOrderPlan(body.worldInfoOrder);
+    const cacheWarm = body.cacheWarm === true;
+    if (body.cacheWarm !== undefined && typeof body.cacheWarm !== 'boolean'
+        || cacheWarm && (source !== 'vertexai' || !isGemini4Model(model) || body.stream !== false)) {
+        throw new PluginError(400, 'INVALID_CACHE_WARM_REQUEST', '缓存保温仅支持 Vertex Gemini 4 的普通请求。');
+    }
 
     return Object.freeze({
         protocolVersion: PROTOCOL_VERSION,
@@ -179,6 +184,7 @@ function validatePreparePayload(body) {
         secretId,
         usageChatId,
         usagePrice,
+        ...(cacheWarm ? { cacheWarm: true } : {}),
         ...(worldInfoOrder && usageChatId ? { worldInfoOrder } : {}),
         // Inspection is optional: malformed/unknown tokens must not reject generation.
         ...(typeof body.promptInspectorTicket === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(body.promptInspectorTicket) ? { promptInspectorTicket: body.promptInspectorTicket } : {}),

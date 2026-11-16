@@ -8,6 +8,7 @@ const { BOUNDARY_FIELD, EVIDENCE_FIELD, STATUS_FIELD, sanitizeCacheBoundaryEvide
 const { validatePreparedGoogleTarget } = require('./target-policy.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
 const { MAX_GOOGLE_ERROR_BYTES, googleErrorDetails, parseGoogleError } = require('./google-errors.cjs');
+const CACHE_WARM_FIELD = '__vertexPayGoCacheWarm';
 
 const protocolError = (code, message) => new PluginError(502, code, message);
 // Google's error message is the only actionable diagnosis (free tier, region,
@@ -113,6 +114,18 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
         let original;
         try { original = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。'); }
         if (!original || typeof original !== 'object' || Array.isArray(original)) throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。');
+        const warming = ticketData.cacheWarm === true;
+        if ((original[CACHE_WARM_FIELD] === true) !== warming) throw new PluginError(400, 'INVALID_CACHE_WARM_REQUEST', '缓存保温请求与准备凭证不一致。');
+        delete original[CACHE_WARM_FIELD];
+        if (warming) {
+            if (ticketData.source !== 'vertexai' || ticketData.stream || original.tools
+                || original.contents?.some(content => content.parts?.some(part => Object.keys(part).some(key => !['text', 'thoughtSignature'].includes(key))))) {
+                throw new PluginError(400, 'INVALID_CACHE_WARM_REQUEST', '缓存保温仅支持普通文本请求。');
+            }
+            original.generationConfig = { ...original.generationConfig, maxOutputTokens: 1,
+                thinkingConfig: { includeThoughts: false, thinkingLevel: 'LOW' } };
+            maxHops = 1;
+        }
         const cacheBoundary = sanitizeCacheBoundaryEvidence(original[EVIDENCE_FIELD], original);
         const boundaryAttempt = sanitizeCacheBoundaryStatus(original[STATUS_FIELD]);
         const cacheBoundaryStatus = cacheBoundary?.status ?? (boundaryAttempt?.status === 'bound' ? 'unavailable' : boundaryAttempt?.status);

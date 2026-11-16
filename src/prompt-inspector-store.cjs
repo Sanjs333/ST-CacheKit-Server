@@ -112,6 +112,7 @@ function metadataSafe(input) {
     if (typeof stream === 'boolean') result.stream = stream;
     if (Number.isSafeInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) result.httpStatus = httpStatus;
     if (Number.isSafeInteger(bodyBytes) && bodyBytes >= 0) result.bodyBytes = bodyBytes;
+    if (get('cacheWarm') === true) result.cacheWarm = true;
     const boundaryStatus = get('cacheBoundaryStatus'), stableChars = get('cacheBoundaryStableTextChars');
     if (BOUNDARY_STATUSES.has(boundaryStatus)) result.cacheBoundaryStatus = boundaryStatus;
     if (Number.isSafeInteger(stableChars) && stableChars >= 0 && stableChars <= 2 * 1024 * 1024) result.cacheBoundaryStableTextChars = stableChars;

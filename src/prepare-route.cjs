@@ -65,6 +65,15 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', '请先登录 SillyTavern 用户账号。');
             }
 
+            if (config.cacheWarm && config.usageChatId && promptInspectorStore) {
+                try {
+                    const issued = promptInspectorStore.prepare({ user: request.user, body: { version: 1,
+                        source: config.source, model: config.model, chatId: config.usageChatId,
+                        trace: { version: 1, complete: false, sources: [], stages: [], events: [{ kind: 'cache-warm',
+                            label: 'Cache warming', evidence: 'observed', after: { outputTokenLimit: 1 } }] } } });
+                    config = { ...config, promptInspectorTicket: issued.ticket };
+                } catch { /* Warming still has a separate usage ledger record. */ }
+            }
             // Scope-bound private inspection reference; no token reaches auth helpers.
             try { promptInspectorReference = promptInspectorStore?.bindGoogleTicket(request, config) ?? null; }
             catch { /* Capture is independent and fail-open. */ }
@@ -141,6 +150,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                         region: config.region ?? null,
                         stream: config.stream,
                         price: config.usagePrice,
+                        ...(config.cacheWarm ? { cacheWarm: true } : {}),
                     });
                 } catch (error) {
                     logStore?.server('error', 'usage_ledger_create_failed', prepareLogContext(config, startedAt, describeError(error)), { priority: 'low' });
@@ -172,6 +182,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 tier: config.tier,
                 region: config.region,
                 usageReference: usageReference ? { file: usageReference.file, id: usageReference.id } : null,
+                ...(config.cacheWarm ? { cacheWarm: true } : {}),
                 ...(billingLabels ? { billingLabels } : {}),
                 ...(config.worldInfoOrder && usageReference ? { worldInfoOrder: config.worldInfoOrder } : {}),
                 ...(promptInspectorReference ? { promptInspectorReference } : {}),
@@ -188,6 +199,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 transport: 'loopback-http',
                 nativeGemini4: true,
                 nativeGeminiCacheBoundary: true,
+                nativeGeminiCacheWarm: true,
                 nativeGemini4Models: [...GEMINI4_MODELS],
                 worldInfoOrderReceipts: typeof usageStore?.captureGoogleRequest === 'function',
                 usageLookup: typeof usageStore?.listByIds === 'function',

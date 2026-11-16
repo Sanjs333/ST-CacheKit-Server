@@ -38,6 +38,7 @@ function wrapToolMetadata(data) {
 }
 const TEXT_PREFIX = 'st-vertex-paygo-text:v1:';
 const MAX_TEXT_METADATA_BYTES = 32 * 1024 * 1024;
+const CACHE_WARM_FIELD = '__vertexPayGoCacheWarm';
 function unpackTextSignature(value) {
     if (typeof value !== 'string' || !value.startsWith(TEXT_PREFIX) || value.length > MAX_TEXT_METADATA_BYTES * 1.4) return null;
     try {
@@ -200,6 +201,15 @@ async function buildNativeGeminiBody(input, runtime) {
         const config = mode ? { mode } : input.tool_choice?.function?.name ? { mode: 'ANY', allowedFunctionNames: [input.tool_choice.function.name] } : null;
         if (config) body.toolConfig = { functionCallingConfig: config };
     }
+    if (input[CACHE_WARM_FIELD] === true) {
+        if (input.chat_completion_source !== 'vertexai' || input.stream || body.tools || input.tools?.length || input.functions?.length || input.continue_prefill
+            || body.contents.some(content => content.parts.some(part => Object.keys(part).some(key => !['text', 'thoughtSignature'].includes(key))))) {
+            throw new PluginError(400, 'INVALID_CACHE_WARM_REQUEST', '缓存保温仅支持 Vertex Gemini 4 的普通文本请求。');
+        }
+        body.generationConfig.maxOutputTokens = 1;
+        body.generationConfig.thinkingConfig = { includeThoughts: false, thinkingLevel: 'LOW' };
+        body[CACHE_WARM_FIELD] = true;
+    }
     return body;
 }
 // Native HTTP has no implicit response-header deadline; Gemini 4 may think for many minutes.
@@ -300,6 +310,11 @@ function createNativeGeminiHandler({ runtime, loopbackTransport, fetchImpl = req
             } else {
                 response.setHeader('Cache-Control', 'no-store');
                 const data = await upstream.json();
+                if (input[CACHE_WARM_FIELD] === true) {
+                    response.json(data);
+                    completed({ model: input.model, stream: false, cacheWarm: true, usageMetadata: sanitizeUsage(data.usageMetadata) });
+                    return;
+                }
                 log('debug', 'response:', data);
                 wrapToolMetadata(data);
                 const content = data.candidates?.[0]?.content;

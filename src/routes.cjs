@@ -81,6 +81,7 @@ function registerRoutes(router, dependencies) {
                 requestPreviews: typeof dependencies.usageStore?.captureGoogleRequest === 'function',
                 nativeGemini4: Boolean(dependencies.loopbackTransport),
                 cachePrefixBoundary: Boolean(dependencies.loopbackTransport),
+                cacheWarm: Boolean(dependencies.loopbackTransport),
                 // Absent means the backend predates the panel updater; false
                 // means the caller is not an administrator.
                 updater: isAdmin && Boolean(dependencies.updater) && dependencies.buildPolicy?.upstreamUpdatesAllowed !== false,
