@@ -1,6 +1,7 @@
 /* Local cache diagnostics; SPDX-License-Identifier: MPL-2.0 */
 'use strict';
 const { Transform } = require('node:stream');
+const { sanitizeCacheBoundaryEvidence } = require('./cache-prefix-boundary.cjs');
 
 const MAX_PREVIEW_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_PREVIEW_CONTENTS = 64;
@@ -12,7 +13,7 @@ function unavailable(reason, bodyBytes = null) {
 }
 
 /** Body-free projection of the exact outbound Google JSON, never a rewrite. */
-function summarizeGoogleRequest(bytes, { fingerprint, epoch, bodyBytes, reason } = {}) {
+function summarizeGoogleRequest(bytes, { fingerprint, epoch, bodyBytes, reason, cacheBoundary } = {}) {
     const length = bodyBytes ?? (Buffer.isBuffer(bytes) ? bytes.length : null);
     if (reason) return unavailable(reason, length);
     if (!Buffer.isBuffer(bytes)) return unavailable('BODY_UNAVAILABLE', length);
@@ -37,7 +38,10 @@ function summarizeGoogleRequest(bytes, { fingerprint, epoch, bodyBytes, reason }
                 if (part.thought === true) thoughtParts++;
                 if (typeof part.thoughtSignature === 'string') signedParts++;
             }
+            const textSegments = content.parts.flatMap((part, index) => typeof part.text === 'string'
+                ? [{ part: index + 1, textChars: part.text.length, fingerprint: fingerprint(part.text) }] : []);
             return { role, partCount: content.parts.length, textChars, textBytes, kinds, thoughtParts, signedParts,
+                textSegments: textSegments.slice(0, 64), omittedTextSegments: Math.max(0, textSegments.length - 64),
                 fingerprint: fingerprint(JSON.stringify(content)) };
         };
         const instruction = body.systemInstruction ?? body.system_instruction;
@@ -46,14 +50,26 @@ function summarizeGoogleRequest(bytes, { fingerprint, epoch, bodyBytes, reason }
             ...describe(content, ['user', 'model'].includes(content?.role) ? content.role : 'unknown') }));
         const parameters = { ...body };
         delete parameters.contents; delete parameters.systemInstruction; delete parameters.system_instruction;
+        // Billing/observability labels do not change model prompt or generation parameters.
+        delete parameters.labels;
         const config = body.generationConfig ?? body.generation_config;
         const generation = {};
         for (const key of ['maxOutputTokens', 'temperature', 'topP', 'topK', 'candidateCount', 'seed']) {
             if (typeof config?.[key] === 'number' && Number.isFinite(config[key])) generation[key] = config[key];
         }
+        let boundary;
+        const evidence = sanitizeCacheBoundaryEvidence(cacheBoundary);
+        if (evidence && body.contents[evidence.block - 1]?.parts?.length >= evidence.part) {
+            const boundaryParts = body.contents[evidence.block - 1].parts.slice(0, evidence.part - 1);
+            const prefix = [...(instruction ? [{ ...instruction, role: 'system' }] : []), ...body.contents.slice(0, evidence.block - 1),
+                ...(boundaryParts.length ? [{ ...body.contents[evidence.block - 1], parts: boundaryParts }] : [])];
+            const textChars = prefix.reduce((sum, content) => sum + content.parts.reduce((n, part) => n + (typeof part.text === 'string' ? part.text.length : 0), 0), 0);
+            if (textChars === evidence.stableTextChars) boundary = { ...evidence, stableFingerprint: fingerprint(JSON.stringify(prefix)) };
+        }
         return { version: 1, status: 'available', bodyBytes: bytes.length, epoch,
             bodyFingerprint: fingerprint(bytes), parametersFingerprint: fingerprint(JSON.stringify(parameters)),
             systemInstruction, contentCount: body.contents.length, contents,
+            ...(boundary ? { cacheBoundary: boundary } : {}),
             omittedContents: Math.max(0, body.contents.length - contents.length), generation,
             toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
             hasExplicitCache: typeof (body.cachedContent ?? body.cached_content) === 'string',

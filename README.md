@@ -1,6 +1,6 @@
 # ST-CacheKit-Server · 提示词缓存优化服务端
 
-[提示词缓存优化](https://github.com/Sanjs333/ST-CacheKit) 的配套后端，提供请求转发、用量记录与提示词记录。
+[提示词缓存优化](https://github.com/Sanjs333/ST-CacheKit) 的配套后端，提供请求转发、用量与提示词记录，以及可选的实际账单查询。
 
 支持 Gemini 4 Hydrogen / Carbon / Argon 的原生请求和续传。Hydrogen 的最大思考强度对应 xhigh；Vertex Gemini 4 使用 Standard，AI Studio 可使用 Standard / Flex。
 

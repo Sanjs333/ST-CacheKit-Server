@@ -7,7 +7,8 @@ const { inspect } = require('node:util');
 const { PluginError, asPluginError, errorPayload } = require('./errors.cjs');
 const { writeResponse } = require('./gemini4-transport.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
-const { sanitizeUsage } = require('./usage-capture.cjs');
+const { sanitizeUsage, mergeUsage } = require('./usage-capture.cjs');
+const { BOUNDARY_FIELD, EVIDENCE_FIELD, prepareCacheBoundary, resolveCacheBoundary } = require('./cache-prefix-boundary.cjs');
 
 // Match the host's console body logs without exposing private transport metadata.
 // These logs deliberately do not go through the body-free diagnostic LogStore.
@@ -116,35 +117,56 @@ async function buildNativeGeminiBody(input, runtime) {
         if (message.tool_call_id) responses.push(message.tool_call_id);
     }
     const names = { charName: String(input.char_name || ''), userName: String(input.user_name || ''), groupNames: Array.isArray(input.group_names) ? input.group_names.map(String) : [], startsWithGroupName(text) { return this.groupNames.some(name => text.startsWith(`${name}: `)); } };
-    if (input.custom_prompt_post_processing) {
-        if (typeof helpers.postProcessPrompt !== 'function') throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆的提示词后处理接口不可用。');
-        messages = helpers.postProcessPrompt(messages, input.custom_prompt_post_processing, names);
+    const boundaryPlan = prepareCacheBoundary(input.messages, messages, input[BOUNDARY_FIELD]);
+    const convert = sourceMessages => {
+        if (input.custom_prompt_post_processing) {
+            if (typeof helpers.postProcessPrompt !== 'function') throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', '酒馆的提示词后处理接口不可用。');
+            sourceMessages = helpers.postProcessPrompt(sourceMessages, input.custom_prompt_post_processing, names);
+        }
+        return helpers.convertGooglePrompt(sourceMessages, input.model, Boolean(input.use_sysprompt), names);
+    };
+    let prompt = convert(messages), boundaryEvidence = null, markedPrompt = null;
+    if (boundaryPlan) {
+        try {
+            markedPrompt = convert(boundaryPlan.messages);
+        } catch { /* Optional boundary capture must leave the original conversion intact. */ }
     }
-    const prompt = helpers.convertGooglePrompt(messages, input.model, Boolean(input.use_sysprompt), names);
-    for (const content of prompt.contents) for (const part of content.parts ?? []) {
-        if (part.functionCall) {
-            const call = calls.shift();
-            if (typeof call?.id === 'string') part.functionCall.id = call.id;
-            if (call?.signature) part.thoughtSignature = call.signature;
-            else delete part.thoughtSignature;
+    const restore = converted => {
+        let callIndex = 0, responseIndex = 0;
+        for (const content of converted.contents) for (const part of content.parts ?? []) {
+            if (part.functionCall) {
+                const call = calls[callIndex++];
+                if (typeof call?.id === 'string') part.functionCall.id = call.id;
+                if (call?.signature) part.thoughtSignature = call.signature;
+                else delete part.thoughtSignature;
+            }
+            if (part.functionResponse) {
+                const localId = responses[responseIndex++];
+                if (typeof localId === 'string') part.functionResponse.id = idMap.get(localId) ?? localId;
+            }
         }
-        if (part.functionResponse) {
-            const localId = responses.shift();
-            if (typeof localId === 'string') part.functionResponse.id = idMap.get(localId) ?? localId;
-        }
+        const signedText = new RegExp(`${marker}S(\\d+)S([\\s\\S]*?)${marker}E`, 'gu');
+        for (const content of converted.contents) content.parts = (content.parts ?? []).flatMap(part => {
+            if (typeof part.text !== 'string' || !part.text.includes(marker)) return [part];
+            const result = []; let offset = 0;
+            for (const match of part.text.matchAll(signedText)) {
+                if (match.index > offset) result.push({ text: part.text.slice(offset, match.index) });
+                result.push({ text: match[2], ...(content.role === 'model' && signatures.get(match[1]) ? { thoughtSignature: signatures.get(match[1]) } : {}) });
+                offset = match.index + match[0].length;
+            }
+            if (offset < part.text.length) result.push({ text: part.text.slice(offset) });
+            return result;
+        });
+        return converted;
+    };
+    prompt = restore(prompt);
+    if (markedPrompt) {
+        try {
+            const separated = resolveCacheBoundary(prompt, restore(markedPrompt), boundaryPlan);
+            prompt = separated.prompt;
+            boundaryEvidence = separated.evidence;
+        } catch { /* Metadata/signature differences retain the original transformed request. */ }
     }
-    const signedText = new RegExp(`${marker}S(\\d+)S([\\s\\S]*?)${marker}E`, 'gu');
-    for (const content of prompt.contents) content.parts = (content.parts ?? []).flatMap(part => {
-        if (typeof part.text !== 'string' || !part.text.includes(marker)) return [part];
-        const result = []; let offset = 0;
-        for (const match of part.text.matchAll(signedText)) {
-            if (match.index > offset) result.push({ text: part.text.slice(offset, match.index) });
-            result.push({ text: match[2], ...(content.role === 'model' && signatures.get(match[1]) ? { thoughtSignature: signatures.get(match[1]) } : {}) });
-            offset = match.index + match[0].length;
-        }
-        if (offset < part.text.length) result.push({ text: part.text.slice(offset) });
-        return result;
-    });
     if (input.continue_prefill || prompt.contents.at(-1)?.role === 'model') prompt.contents.push({ role: 'user', parts: [{ text: 'Continue the previous assistant response from where it stopped, without repeating previous content.' }] });
     const thinkingConfig = { includeThoughts: Boolean(input.include_reasoning) };
     const effort = String(input.reasoning_effort).toLowerCase();
@@ -158,6 +180,9 @@ async function buildNativeGeminiBody(input, runtime) {
     if (input.responseSchema || input.json_schema?.value) generationConfig.responseSchema = input.responseSchema ?? input.json_schema.value;
     const body = { contents: prompt.contents, generationConfig, safetySettings: structuredClone([...helpers.GEMINI_SAFETY, ...((input.chat_completion_source) === 'vertexai' ? helpers.VERTEX_SAFETY : [])]) };
     if (input.use_sysprompt && prompt.system_instruction?.parts?.length) body.systemInstruction = prompt.system_instruction;
+    // Private body-free receipt for our loopback transport. It strips this
+    // field before serializing any Google request or continuation.
+    if (boundaryEvidence) body[EVIDENCE_FIELD] = boundaryEvidence;
     const declarations = [], custom = [];
     for (const tool of structuredClone(input.tools ?? [])) {
         if (tool.type === 'function' && tool.function) {
@@ -222,6 +247,8 @@ function createNativeGeminiHandler({ runtime, loopbackTransport, fetchImpl = req
             if (typeof base !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+$/u.test(base) || typeof input.reverse_proxy !== 'string' || !input.reverse_proxy.startsWith(prefix) || !/^[A-Za-z0-9_-]+$/u.test(input.reverse_proxy.slice(prefix.length))) throw new PluginError(400, 'INVALID_PROXY_TARGET', '准备的本地代理目标无效。');
             if (typeof input.proxy_password !== 'string' || !input.proxy_password || /[\r\n]/u.test(input.proxy_password)) throw new PluginError(400, 'INVALID_REQUEST', '缺少准备阶段签发的代理凭证。');
             const body = await buildNativeGeminiBody(input, runtime);
+            if (input[BOUNDARY_FIELD]) response.setHeader('X-ST-CacheKit-Cache-Boundary', JSON.stringify(body[EVIDENCE_FIELD]
+                || { version: 1, status: 'unavailable' }));
             const endpoint = input.stream ? 'streamGenerateContent' : 'generateContent';
             const source = input.chat_completion_source;
             const apiVersion = input.native_gemini_api_version ?? 'v1beta';
@@ -302,7 +329,7 @@ function transformFrame(frame, state) {
             state.failureCode = typeof parsed.error.code === 'string' && /^[A-Z0-9_]{1,80}$/u.test(parsed.error.code)
                 ? parsed.error.code : 'NATIVE_GEMINI_UPSTREAM_FAILED';
         }
-        if (parsed.usageMetadata) state.usage = sanitizeUsage(parsed.usageMetadata);
+        if (parsed.usageMetadata) state.usage = mergeUsage(state.usage, parsed.usageMetadata);
         if (typeof parsed.promptFeedback?.blockReason === 'string') state.reason = parsed.promptFeedback.blockReason;
         const candidate = parsed.candidates?.[0];
         if (candidate) {

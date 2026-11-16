@@ -15,6 +15,7 @@ const { describeError } = require('./log-store.cjs');
 const { PLUGIN_ID, PROTOCOL_VERSION, validatePreparePayload } = require('./protocol.cjs');
 const { prepareGoogleHeaders, prepareGoogleTarget } = require('./target-policy.cjs');
 const { GEMINI4_MODELS } = require('./gemini4-models.cjs');
+const { createBillingLabels } = require('./billing-labels.cjs');
 const EXPLICIT_SECRET_ERROR_CODES = new Set([
     'EXPLICIT_SECRET_UNSUPPORTED',
     'EXPLICIT_SECRET_NOT_FOUND',
@@ -50,7 +51,7 @@ function prepareLogContext(config, startedAt, additional = undefined) {
     };
 }
 
-function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logStore, usageStore, promptInspectorStore }) {
+function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logStore, usageStore, promptInspectorStore, billingStore }) {
     return async function prepareHandler(request, response) {
         const startedAt = Date.now();
         let config;
@@ -150,6 +151,16 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 try { if (promptInspectorReference) promptInspectorStore?.failGoogleTicket(promptInspectorReference, 'CLIENT_DISCONNECTED'); } catch {}
                 return undefined;
             }
+            let billingLabels;
+            if (config.source === 'vertexai' && usageReference) {
+                try {
+                    const billing = billingStore?.read(request.user);
+                    if (billing && billing.labelMode !== 'off') {
+                        billingLabels = createBillingLabels(config.usageChatId, usageReference.id, billing.labelMode);
+                        usageStore.update(usageReference, { billingLabels });
+                    }
+                } catch { /* Optional billing correlation never blocks generation. */ }
+            }
             const issued = ticketStore.commit(reservation, {
                 targetUrl,
                 headers,
@@ -161,6 +172,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 tier: config.tier,
                 region: config.region,
                 usageReference: usageReference ? { file: usageReference.file, id: usageReference.id } : null,
+                ...(billingLabels ? { billingLabels } : {}),
                 ...(config.worldInfoOrder && usageReference ? { worldInfoOrder: config.worldInfoOrder } : {}),
                 ...(promptInspectorReference ? { promptInspectorReference } : {}),
             });
@@ -175,6 +187,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 pluginId: PLUGIN_ID,
                 transport: 'loopback-http',
                 nativeGemini4: true,
+                nativeGeminiCacheBoundary: true,
                 nativeGemini4Models: [...GEMINI4_MODELS],
                 worldInfoOrderReceipts: typeof usageStore?.captureGoogleRequest === 'function',
                 usageLookup: typeof usageStore?.listByIds === 'function',
@@ -186,6 +199,7 @@ function createPrepareHandler({ stRuntime, ticketStore, loopbackTransport, logSt
                 proxyUrl,
                 expiresAt: issued.expiresAt,
                 usageId: usageReference?.id ?? null,
+                ...(billingLabels ? { billingLabels } : {}),
             });
         } catch (error) {
             if (reservation) ticketStore.release(reservation);

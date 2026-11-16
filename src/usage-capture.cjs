@@ -26,26 +26,76 @@ function sanitizeDetails(value) {
 function sanitizeUsage(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const usage = {};
+    const invalidUsageFields = [];
     for (const field of COUNT_FIELDS) {
         if (Number.isSafeInteger(value[field]) && value[field] >= 0) usage[field] = value[field];
+        else if (Object.hasOwn(value, field) && value[field] !== undefined) invalidUsageFields.push(field);
     }
     for (const field of DETAIL_FIELDS) {
         const details = sanitizeDetails(value[field]);
         if (details) usage[field] = details;
     }
     if (typeof value.trafficType === 'string' && value.trafficType.length <= 64) usage.trafficType = value.trafficType;
-    if (!Object.keys(usage).length) return null;
-    // Keep provenance before finish() supplies zero for cost estimation.
-    // A missing or malformed upstream field must not become a confirmed miss.
-    usage.cacheCountStatus = value.cachedContentTokenCount == null ? 'omitted'
-        : Number.isSafeInteger(value.cachedContentTokenCount) && value.cachedContentTokenCount >= 0 ? 'reported' : 'invalid';
+    if (!Object.keys(usage).length && !invalidUsageFields.length) return null;
+    if (invalidUsageFields.length) usage.invalidUsageFields = invalidUsageFields;
+    // Zero inference belongs to successful, complete official responses only.
+    usage.cacheCountStatus = invalidUsageFields.includes('cachedContentTokenCount')
+        || usage.cachedContentTokenCount > usage.promptTokenCount ? 'invalid'
+        : usage.cachedContentTokenCount === undefined ? 'omitted' : 'reported';
+    if (usage.cacheCountStatus === 'reported') usage.cacheCountSource = 'upstream';
+    return usage;
+}
+
+/** Merge cumulative snapshots from ONE request. Never add stream frames. */
+function mergeUsage(previous, value, { sanitized = false } = {}) {
+    const incoming = sanitized ? value : sanitizeUsage(value);
+    if (!incoming) return previous ? { ...previous } : null;
+    const usage = { ...(previous || {}) };
+    for (const field of COUNT_FIELDS) {
+        if (incoming[field] !== undefined) usage[field] = Math.max(usage[field] ?? 0, incoming[field]);
+    }
+    for (const field of DETAIL_FIELDS) {
+        if (!incoming[field]) continue;
+        const details = new Map((usage[field] || []).map(item => [item.modality, { ...item }]));
+        for (const item of incoming[field]) {
+            const old = details.get(item.modality);
+            details.set(item.modality, { ...old, ...item,
+                ...(item.tokenCount !== undefined || old?.tokenCount !== undefined
+                    ? { tokenCount: Math.max(old?.tokenCount ?? 0, item.tokenCount ?? 0) } : {}) });
+        }
+        usage[field] = [...details.values()];
+    }
+    if (incoming.trafficType !== undefined) usage.trafficType = incoming.trafficType;
+    const invalid = [...new Set([...(previous?.invalidUsageFields || []), ...(incoming.invalidUsageFields || [])])];
+    if (invalid.length) usage.invalidUsageFields = invalid;
+    usage.cacheCountStatus = previous?.cacheCountStatus === 'invalid' || incoming.cacheCountStatus === 'invalid'
+        || usage.cachedContentTokenCount > usage.promptTokenCount ? 'invalid'
+        : usage.cachedContentTokenCount === undefined ? 'omitted' : 'reported';
+    if (usage.cacheCountStatus === 'reported') usage.cacheCountSource = 'upstream';
+    else delete usage.cacheCountSource;
+    return usage;
+}
+
+/** Complete official ProtoJSON omits its non-optional integer's zero value. */
+function finalizeGoogleUsage(value, { officialGoogle = false, complete = false } = {}) {
+    if (!value) return null;
+    const usage = { ...value };
+    const valid = field => Number.isSafeInteger(usage[field]) && usage[field] >= 0;
+    if (usage.cacheCountStatus === 'omitted' && officialGoogle && complete
+        && valid('promptTokenCount') && valid('candidatesTokenCount')
+        && !(usage.invalidUsageFields?.length)
+        && !(usage.cacheTokensDetails || []).some(item => item.tokenCount > 0)) {
+        usage.cachedContentTokenCount = 0;
+        usage.cacheCountStatus = 'reported';
+        usage.cacheCountSource = 'google-default-zero';
+    }
     return usage;
 }
 
 function usageFromJson(value) {
     if (Array.isArray(value)) {
         let latest = null;
-        for (const item of value) latest = usageFromJson(item) || latest;
+        for (const item of value) latest = mergeUsage(latest, usageFromJson(item), { sanitized: true });
         return latest;
     }
     return sanitizeUsage(value?.usageMetadata);
@@ -86,7 +136,7 @@ class TopLevelUsageScanner {
             else if (character === '{') this.captureDepth += 1;
             else if (character === '}' && --this.captureDepth === 0) {
                 if (!this.limitExceeded) {
-                    try { this.usage = sanitizeUsage(JSON.parse(this.capture)) || this.usage; } catch {                                  }
+                    try { this.usage = mergeUsage(this.usage, JSON.parse(this.capture)); } catch {                                  }
                 }
                 this.capture = null;
             }
@@ -121,7 +171,6 @@ class TopLevelUsageScanner {
                 this.captureDepth = 1;
                 this.captureInString = false;
                 this.captureEscape = false;
-                this.limitExceeded = false;
                 this.awaitingUsage = false;
             }
             return;
@@ -144,8 +193,11 @@ class TopLevelUsageScanner {
 }
 
 class UsageCapture {
-    constructor({ stream, maxBufferBytes = 256 * 1024 } = {}) {
+    constructor({ stream, maxBufferBytes = 256 * 1024, officialGoogle = false } = {}) {
         this.stream = stream;
+        this.officialGoogle = officialGoogle;
+        this.terminalSeen = false;
+        this.upstreamError = false;
         this.maxBufferBytes = maxBufferBytes;
         this.buffer = '';
         this.decoder = new StringDecoder('utf8');
@@ -157,12 +209,7 @@ class UsageCapture {
 
     #merge(usage) {
         if (usage) {
-            const previous = this.usage?.cacheCountStatus;
-            const next = usage.cacheCountStatus;
-            const cacheCountStatus = previous === 'invalid' || next === 'invalid' ? 'invalid'
-                : previous === 'reported' || next === 'reported' ? 'reported' : 'omitted';
-            this.usage = { ...(this.usage || {}), ...usage, cacheCountStatus };
-            this.limitExceeded = false;
+            this.usage = mergeUsage(this.usage, usage, { sanitized: true });
         }
     }
 
@@ -170,7 +217,13 @@ class UsageCapture {
         const data = event.split(/\r?\n/u).filter(line => line.startsWith('data:'))
             .map(line => line.slice(5).trimStart()).join('\n');
         if (!data || data === '[DONE]') return;
-        try { this.#merge(usageFromJson(JSON.parse(data))); } catch {                                            }
+        try {
+            const parsed = JSON.parse(data);
+            this.upstreamError ||= !!parsed?.error;
+            this.terminalSeen ||= !!parsed?.promptFeedback?.blockReason
+                || (parsed?.candidates || []).some(candidate => !!candidate?.finishReason);
+            this.#merge(usageFromJson(parsed));
+        } catch { /* Non-JSON stream events do not supply usage. */ }
     }
 
     #streamText(text) {
@@ -197,7 +250,7 @@ class UsageCapture {
         else this.scanner.write(text);
     }
 
-    finish() {
+    finish({ complete = false } = {}) {
         const tail = this.decoder.end();
         if (this.stream) {
             this.#streamText(tail);
@@ -208,13 +261,9 @@ class UsageCapture {
             this.limitExceeded ||= this.scanner.limitExceeded;
         }
         this.buffer = '';
-        if (!this.usage) return null;
-        const usage = { ...this.usage };
-        for (const field of ['cachedContentTokenCount', 'thoughtsTokenCount', 'toolUsePromptTokenCount']) {
-            if (usage[field] === undefined) usage[field] = 0;
-        }
-        return usage;
+        return finalizeGoogleUsage(this.usage, { officialGoogle: this.officialGoogle,
+            complete: complete && !this.limitExceeded && !this.upstreamError && (!this.stream || this.terminalSeen) });
     }
 }
 
-module.exports = { TopLevelUsageScanner, UsageCapture, sanitizeUsage, usageFromJson };
+module.exports = { TopLevelUsageScanner, UsageCapture, sanitizeUsage, usageFromJson, mergeUsage, finalizeGoogleUsage };

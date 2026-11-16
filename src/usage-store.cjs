@@ -6,6 +6,7 @@ const { createInterface } = require('node:readline');
 const { setImmediate: yieldToServer } = require('node:timers/promises');
 const { randomUUID, randomBytes, createHmac } = require('node:crypto');
 const { summarizeGoogleRequest, MAX_STORED_GOOGLE_REQUESTS } = require('./google-request-preview.cjs');
+const { GoogleRequestComparisonStore } = require('./google-request-comparison.cjs');
 
 const STORE_DIRECTORY = 'vertex-paygo';
 const STORE_FILE = 'usage-ledger.jsonl';
@@ -86,6 +87,7 @@ class UsageStore {
     #dirtyFiles = new Set();
     #cleanupTimers = new Map();
     #closed = false;
+    #requestComparisons;
     constructor({ fsModule = fs, now = () => Date.now(), pendingTimeoutMs = 35 * 60_000,
         cleanupDelayMs = 500, onCleanupError = error => console.warn('[提示词缓存优化] 费用账本自动清理失败。', error) } = {}) {
         this.fs = fsModule;
@@ -102,6 +104,7 @@ class UsageStore {
         this.readyDirectories = new Set();
         this.#previewKey = randomBytes(32);
         this.#previewEpoch = randomUUID();
+        this.#requestComparisons = new GoogleRequestComparisonStore({ now });
     }
 
     #append(file, record) {
@@ -310,6 +313,14 @@ class UsageStore {
         if (!record || record.status !== 'pending' || !this.activeIds.has(record.id)) return;
         const updated = { ...record };
         if (patch.usage !== undefined) updated.usage = clone(patch.usage);
+        if (patch.billingLabels && typeof patch.billingLabels === 'object' && !Array.isArray(patch.billingLabels)) {
+            const labels = {};
+            for (const key of ['st_cachekit_chat', 'st_cachekit_request']) {
+                const value = patch.billingLabels[key];
+                if (typeof value === 'string' && /^[a-z0-9_-]{1,63}$/.test(value)) labels[key] = value;
+            }
+            if (Object.keys(labels).length) updated.billingLabels = labels;
+        }
         if (patch.status) updated.status = patch.status;
         if (patch.errorCode) updated.errorCode = patch.errorCode;
         else if (patch.status === 'complete') delete updated.errorCode;
@@ -326,6 +337,12 @@ class UsageStore {
         // hashes. Only projections are persisted; raw bytes never leave here.
         const summary = summarizeGoogleRequest(bytes, { ...options, epoch: this.#previewEpoch,
             fingerprint: value => createHmac('sha256', this.#previewKey).update(reference.file).update('\0').update(value).digest('hex') });
+        if (summary.status === 'available' && !record.googleRequestCount) {
+            const scope = JSON.stringify([reference.file, record.chatId, record.model, record.source, record.region]);
+            const comparison = this.#requestComparisons.capture({ scope, id: record.id, bytes, worldInfoOrder,
+                isComplete: id => this.indexes.get(reference.file)?.get(id)?.status === 'complete' });
+            if (comparison) summary.requestComparison = comparison;
+        }
         if (worldInfoOrder) {
             const sequence = (this.#wireSequences.get(reference.file) ?? 0) + 1;
             this.#wireSequences.set(reference.file, sequence);
@@ -403,6 +420,7 @@ class UsageStore {
 
     async close() {
         this.#closed = true;
+        this.#requestComparisons.close();
         for (const timer of this.#cleanupTimers.values()) clearTimeout(timer);
         this.#cleanupTimers.clear();
         await Promise.allSettled(this.loading.values());

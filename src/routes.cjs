@@ -20,6 +20,7 @@ const { createClientLogHandler, createReadLogsHandler } = require('./log-routes.
 const { createPrepareHandler } = require('./prepare-route.cjs');
 const { createUsageHandler } = require('./usage-route.cjs');
 const { createNativeGeminiHandler } = require('./native-gemini.cjs');
+const { registerBillingRoutes } = require('./billing-routes.cjs');
 const {
     createCheckUpdateHandler,
     createStartUpdateHandler,
@@ -39,6 +40,7 @@ function registerPromptInspectorRoutes(router, store) {
 }
 
 function registerRoutes(router, dependencies) {
+    if (dependencies.billingStore && dependencies.billingClient) registerBillingRoutes(router, dependencies);
     if (dependencies.promptInspectorStore) registerPromptInspectorRoutes(router, dependencies.promptInspectorStore);
     registerNativeRelayRoutes(router, dependencies);
     // Compatibility response for older clients. No host-source observer is
@@ -70,6 +72,7 @@ function registerRoutes(router, dependencies) {
                 logs: isAdmin,
                 clientLogging: isAdmin,
                 usage: true,
+                billing: Boolean(dependencies.billingStore && dependencies.billingClient),
                 usageLookup: typeof dependencies.usageStore?.listByIds === 'function',
                 promptInspector: dependencies.promptInspectorStore?.capabilities() ?? { version: 1, available: false,
                     api: false, nativeWire: false, nativeRelay: false, googleWire: false, requiresHostPatch: false,
@@ -77,6 +80,7 @@ function registerRoutes(router, dependencies) {
                 nativeOrderReceipts: false,
                 requestPreviews: typeof dependencies.usageStore?.captureGoogleRequest === 'function',
                 nativeGemini4: Boolean(dependencies.loopbackTransport),
+                cachePrefixBoundary: Boolean(dependencies.loopbackTransport),
                 // Absent means the backend predates the panel updater; false
                 // means the caller is not an administrator.
                 updater: isAdmin && Boolean(dependencies.updater) && dependencies.buildPolicy?.upstreamUpdatesAllowed !== false,

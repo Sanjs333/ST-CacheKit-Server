@@ -10,6 +10,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { PluginError } = require('./errors.cjs');
 const { createHostSecretReader } = require('./host-secrets.cjs');
@@ -231,6 +232,20 @@ async function loadStRuntime({
         return nativeGeminiHelpers;
     };
 
+    const getBillingAuthorization = async (user, secretId = '') => {
+        try {
+            const config = await getGoogleApiConfig({ user, body: { api: 'vertexai', vertexai_auth_mode: 'full', vertexai_region: 'global', ...(secretId ? { secret_id: secretId } : {}) } }, 'gemini-4-carbon', 'generateContent');
+            const projectId = new URL(config.url).pathname.match(/\/projects\/([^/]+)\//u)?.[1];
+            const authorization = Object.entries(config.headers || {}).find(([key]) => key.toLowerCase() === 'authorization')?.[1];
+            if (!projectId || typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) throw new Error();
+            const serialized = readHostSecret(user.directories, secretsModule.SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT, secretId || undefined);
+            const credentialId = createHash('sha256').update(String(serialized)).digest('hex');
+            return { projectId, authorization, credentialId };
+        } catch {
+            throw new PluginError(400, 'BILLING_CREDENTIAL_UNAVAILABLE', '账单查询需要可用的 Vertex 服务账号凭证；可以复用当前服务账号并补充 BigQuery 权限。');
+        }
+    };
+
     return Object.freeze({
         rootDir: resolvedRoot,
         hostName: packageData.name,
@@ -239,6 +254,7 @@ async function loadStRuntime({
         getGoogleApiConfig,
         getNativeGeminiHelpers,
         getNativeAuthorization,
+        getBillingAuthorization,
     });
 }
 

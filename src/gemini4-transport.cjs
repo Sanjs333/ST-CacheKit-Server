@@ -2,7 +2,9 @@
 
 const { StringDecoder } = require('node:string_decoder');
 const { PluginError, asPluginError, errorPayload } = require('./errors.cjs');
-const { sanitizeUsage } = require('./usage-capture.cjs');
+const { sanitizeUsage, mergeUsage, finalizeGoogleUsage } = require('./usage-capture.cjs');
+const { applyBillingLabels } = require('./billing-labels.cjs');
+const { BOUNDARY_FIELD, EVIDENCE_FIELD, sanitizeCacheBoundaryEvidence } = require('./cache-prefix-boundary.cjs');
 const { validatePreparedGoogleTarget } = require('./target-policy.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
 const { MAX_GOOGLE_ERROR_BYTES, googleErrorDetails, parseGoogleError } = require('./google-errors.cjs');
@@ -32,22 +34,52 @@ async function readGoogleError(incoming) {
 }
 function addUsage(total, usage) {
     const result = { ...(total || {}) };
-    for (const [key, value] of Object.entries(sanitizeUsage(usage) || {})) {
+    const incoming = sanitizeUsage(usage);
+    if (!incoming) return total ? { ...total } : null;
+    // Callers have already sanitized each hop, including invalid field markers.
+    if (usage.cacheCountStatus === 'invalid') incoming.cacheCountStatus = 'invalid';
+    if (usage.cacheCountStatus === 'mixed') incoming.cacheCountStatus = 'mixed';
+    if (usage.invalidUsageFields?.length) incoming.invalidUsageFields = [...usage.invalidUsageFields];
+    if (usage.cacheCountSource === 'google-default-zero' && incoming.cachedContentTokenCount === 0) {
+        incoming.cacheCountSource = 'google-default-zero';
+    }
+    const previousSource = result.cacheCountSource;
+    for (const [key, value] of Object.entries(incoming)) {
         if (key === 'cacheCountStatus') {
             const previous = result[key];
             result[key] = previous === undefined || previous === value ? value
                 : previous === 'invalid' || value === 'invalid' ? 'invalid' : 'mixed';
-        } else if (typeof value === 'number') result[key] = (result[key] || 0) + value;
+        } else if (key === 'invalidUsageFields') {
+            result[key] = [...new Set([...(result[key] || []), ...value])];
+        } else if (key === 'cacheCountSource') {
+            result[key] = previousSource === 'upstream' || value === 'upstream' ? 'upstream' : value;
+        } else if (typeof value === 'number') {
+            const sum = (result[key] || 0) + value;
+            if (Number.isSafeInteger(sum)) result[key] = sum;
+            else {
+                delete result[key];
+                result.invalidUsageFields = [...new Set([...(result.invalidUsageFields || []), key])];
+                result.cacheCountStatus = 'invalid';
+            }
+        }
         else if (Array.isArray(value)) {
             const items = new Map((result[key] || []).map(item => [item.modality, { ...item }]));
             for (const item of value) {
                 const old = items.get(item.modality) || { modality: item.modality, tokenCount: 0 };
-                old.tokenCount += item.tokenCount || 0;
+                const sum = old.tokenCount + (item.tokenCount || 0);
+                if (Number.isSafeInteger(sum)) old.tokenCount = sum;
+                else {
+                    delete old.tokenCount;
+                    result.invalidUsageFields = [...new Set([...(result.invalidUsageFields || []), key])];
+                    result.cacheCountStatus = 'invalid';
+                }
                 items.set(item.modality, old);
             }
             result[key] = [...items.values()];
         } else result[key] = value;
     }
+    if (result.cachedContentTokenCount > result.promptTokenCount) result.cacheCountStatus = 'invalid';
+    if (result.cacheCountStatus !== 'reported') delete result.cacheCountSource;
     return Object.keys(result).length ? result : null;
 }
 async function write(response, data) {
@@ -81,6 +113,10 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
         let original;
         try { original = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。'); }
         if (!original || typeof original !== 'object' || Array.isArray(original)) throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。');
+        const cacheBoundary = sanitizeCacheBoundaryEvidence(original[EVIDENCE_FIELD], original);
+        delete original[EVIDENCE_FIELD];
+        delete original[BOUNDARY_FIELD];
+        applyBillingLabels(original, ticketData.billingLabels);
         const config = { ...(original.generationConfig || {}) };
         for (const key of ['temperature', 'topP', 'topK', 'candidateCount', 'presencePenalty', 'frequencyPenalty']) delete config[key];
         original.generationConfig = config;
@@ -107,7 +143,7 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
                 active = upstreamRequest(upstreamTarget, { method: 'POST', headers }, resolve);
                 active.once('error', reject);
                 active.setTimeout?.(upstreamTimeoutMs, () => active.destroy(new PluginError(504, 'VERTEX_UPSTREAM_TIMEOUT', 'Google 上游请求超时，请稍后重试或检查网络与代理连接。')));
-                try { onRequest(bytes); } catch { /* Diagnostics cannot block generation. */ }
+                try { onRequest(bytes, cacheBoundary ? { cacheBoundary } : {}); } catch { /* Diagnostics cannot block generation. */ }
                 active.end(bytes);
             });
             activeIncoming = upstreamResponse;
@@ -124,7 +160,10 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
             const accept = async value => {
                 if (!value || typeof value !== 'object') throw protocolError('GEMINI4_UPSTREAM_ERROR', 'Google 上游返回错误。');
                 if (value.error) throw googleFailure(Number.isSafeInteger(value.error.code) ? value.error.code : 502, value.error, 'Google 上游返回错误');
-                if (value.usageMetadata) { latestUsage = value.usageMetadata; onUsage(addUsage(usage, latestUsage), false); }
+                if (value.usageMetadata) {
+                    latestUsage = mergeUsage(latestUsage, value.usageMetadata);
+                    onUsage(addUsage(usage, latestUsage), false);
+                }
                 if (typeof value.continuationToken === 'string') latestToken = value.continuationToken;
                 const candidate = value.candidates?.[0];
                 if (candidate) {
@@ -172,6 +211,11 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
             if (ticketData.stream && !reason && !finalValue?.promptFeedback?.blockReason) {
                 throw protocolError('GEMINI4_INCOMPLETE_RESPONSE', 'Google 流式响应提前结束，未返回生成结束原因。');
             }
+            latestUsage = finalizeGoogleUsage(latestUsage, {
+                officialGoogle: (ticketData.source || 'vertexai') === 'vertexai'
+                    || ticketData.source === 'makersuite' && !ticketData.reverseProxy,
+                complete: !!reason || !ticketData.stream,
+            });
             usage = addUsage(usage, latestUsage);
             onUsage(usage, false);
             const hopCount = latestUsage?.candidatesTokenCount ?? (latestUsage?.thoughtsTokenCount > 0 ? 0 : undefined);

@@ -19,6 +19,7 @@ const { PromptInspectorBodyTap } = require('./prompt-inspector-tap.cjs');
 const { GoogleRequestPreviewTap } = require('./google-request-preview.cjs');
 const { isGemini4Model, runGemini4Transport } = require('./gemini4-transport.cjs');
 const { MAX_GOOGLE_ERROR_BYTES, googleErrorDetails, parseGoogleError } = require('./google-errors.cjs');
+const { applyBillingLabels } = require('./billing-labels.cjs');
 
 const HOP_BY_HOP_HEADERS = new Set([
     'connection',
@@ -81,6 +82,21 @@ class FlexBodyTransform extends ByteLimitTransform {
     _destroy(error, callback) {
         this.chunks = [];
         callback(error);
+    }
+}
+
+class BillingBodyTransform extends FlexBodyTransform {
+    constructor(limit, labels) { super(limit); this.labels = labels; }
+    _flush(callback) {
+        try {
+            const body = JSON.parse(Buffer.concat(this.chunks).toString('utf8'));
+            this.chunks = [];
+            if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
+            applyBillingLabels(body, this.labels);
+            const bytes = Buffer.from(JSON.stringify(body));
+            if (bytes.length > this.limit) return callback(new PluginError(413, 'REQUEST_BODY_TOO_LARGE', '加入账单关联标签后的请求超过大小上限。'));
+            callback(null, bytes);
+        } catch { callback(new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。')); }
     }
 }
 
@@ -269,12 +285,12 @@ function createProxyHandler({
                 runGemini4Transport({
                     request, response, ticketData, target, upstreamRequest,
                     maxBodyBytes, upstreamTimeoutMs,
-                    onRequest: bytes => {
+                    onRequest: (bytes, info) => {
                         // Each Gemini4 continuation is a separate final dispatch.
                         finishInspection(undefined, { httpStatus: 200 });
                         inspectorDispatch = beginInspection({ transport: 'google-gemini4', tier: ticketData.tier, region: ticketData.region, stream: ticketData.stream });
                         try { promptInspectorStore?.captureGoogleBody(inspectorDispatch, bytes); } catch {}
-                        try { usageStore?.captureGoogleRequest?.(usageReference, bytes, undefined, ticketData.worldInfoOrder); }
+                        try { usageStore?.captureGoogleRequest?.(usageReference, bytes, info, ticketData.worldInfoOrder); }
                         catch { logStore?.server('warn', 'request_preview_capture_failed', makeLogContext(), { priority: 'low' }); }
                     },
                     onUsage: (usage, complete) => {
@@ -325,7 +341,9 @@ function createProxyHandler({
                 let errorChunks = errorDetails && !compressed ? [] : null;
                 let errorBytes = 0;
                 if (!compressed) {
-                    usageCapture = new UsageCapture({ stream: ticketData.stream });
+                    usageCapture = new UsageCapture({ stream: ticketData.stream,
+                        officialGoogle: (ticketData.source || 'vertexai') === 'vertexai'
+                            || ticketData.source === 'makersuite' && !ticketData.reverseProxy });
                     upstreamResponse.on('data', chunk => {
                         try { usageCapture.write(chunk); } catch { /* Usage capture is observational. */ }
                         if (errorChunks) {
@@ -341,9 +359,10 @@ function createProxyHandler({
                         errorChunks = null;
                     }
                     finishInspection(statusCode >= 400 ? `UPSTREAM_HTTP_${statusCode}` : undefined, { httpStatus: statusCode });
-                    const usage = usageCapture?.finish() || null;
+                    const usage = usageCapture?.finish({ complete: statusCode >= 200 && statusCode < 300 }) || null;
                     if (statusCode >= 400) finalizeUsage('failed', `UPSTREAM_HTTP_${statusCode}`, usage);
                     else if (usageCapture?.limitExceeded) finalizeUsage('incomplete', 'USAGE_CAPTURE_LIMIT', usage);
+                    else if (ticketData.stream && usageCapture && !usageCapture.terminalSeen) finalizeUsage('incomplete', 'USAGE_STREAM_INCOMPLETE', usage);
                     else if (usage) finalizeUsage('complete', undefined, usage);
                     else finalizeUsage('incomplete', compressed ? 'USAGE_COMPRESSED_RESPONSE'
                         : usageCapture?.limitExceeded ? 'USAGE_CAPTURE_LIMIT' : 'USAGE_METADATA_MISSING');
@@ -366,7 +385,8 @@ function createProxyHandler({
             });
 
             bodyStream = ticketData.source === 'makersuite' && ticketData.tier === 'flex'
-                ? new FlexBodyTransform(maxBodyBytes) : new ByteLimitTransform(maxBodyBytes);
+                ? new FlexBodyTransform(maxBodyBytes) : ticketData.billingLabels
+                    ? new BillingBodyTransform(maxBodyBytes, ticketData.billingLabels) : new ByteLimitTransform(maxBodyBytes);
             bodyStream.on('error', fail);
             upstream.on('error', error => {
                 fail(error instanceof PluginError
@@ -424,6 +444,7 @@ function createProxyHandler({
 
 module.exports = {
     ByteLimitTransform,
+    BillingBodyTransform,
     copyUpstreamHeaders,
     createProxyHandler,
     parseProxyPath,

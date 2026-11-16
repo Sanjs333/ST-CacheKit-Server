@@ -17,6 +17,8 @@ const { createUpdater } = require('./src/updater/index.cjs');
 const { loadStRuntime } = require('./src/st-runtime.cjs');
 const { TicketStore } = require('./src/ticket-store.cjs');
 const { UsageStore } = require('./src/usage-store.cjs');
+const { BillingStore } = require('./src/billing-store.cjs');
+const { BillingClient } = require('./src/billing-client.cjs');
 const { PromptInspectorStore } = require('./src/prompt-inspector-store.cjs');
 const { readBuildPolicy } = require('./src/build-policy.cjs');
 
@@ -41,6 +43,8 @@ async function init(router) {
     const promptInspectorStore = new PromptInspectorStore({ getCapability: () => nativeRelay?.available === true });
     try {
         const stRuntime = await loadStRuntime();
+        const billingStore = new BillingStore();
+        const billingClient = new BillingClient({ getAuthorization: (user, secretId) => stRuntime.getBillingAuthorization(user, secretId) });
         // Component paths and repositories remain lazy until an admin check.
         const buildPolicy = readBuildPolicy(__dirname);
         const updater = buildPolicy.upstreamUpdatesAllowed ? createUpdater({ logStore }) : undefined;
@@ -61,7 +65,7 @@ async function init(router) {
             logStore.server('warn', 'native_relay_unavailable');
         }
         registerRoutes(router, { stRuntime, ticketStore, loopbackTransport, logStore, usageStore, updater, buildPolicy,
-            nativeTicketStore, nativeRelay, promptInspectorStore });
+            nativeTicketStore, nativeRelay, promptInspectorStore, billingStore, billingClient });
         activeState = { ticketStore, loopbackTransport, nativeTicketStore, nativeRelay, logStore, usageStore, promptInspectorStore };
         logStore.server('info', 'plugin_ready', {
             hostName: stRuntime.hostName,
