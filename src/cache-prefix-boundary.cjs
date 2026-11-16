@@ -5,6 +5,9 @@ const { isDeepStrictEqual } = require('node:util');
 
 const BOUNDARY_FIELD = '__vertexPayGoCacheBoundary';
 const EVIDENCE_FIELD = '__vertexPayGoCacheBoundaryEvidence';
+const STATUS_FIELD = '__vertexPayGoCacheBoundaryStatus';
+const BOUNDARY_STATUSES = new Set(['waiting', 'disabled', 'source-unavailable', 'source-ready', 'ambiguous', 'unsupported',
+    'bound', 'unavailable', 'submitted', 'split', 'already-separated']);
 const MAX_BOUNDARY_BYTES = 2 * 1024 * 1024;
 const FIELDS = ['version', 'messageIndex', 'textPartIndex', 'offset', 'messagesHash', 'sourceId'];
 const integer = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum;
@@ -19,9 +22,10 @@ function validateCacheBoundary(messages, value) {
             || Object.keys(value).some(key => !FIELDS.includes(key)) || value.version !== 1
             || !integer(value.messageIndex, messages.length - 1) || !integer(value.offset, MAX_BOUNDARY_BYTES)
             || typeof value.messagesHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.messagesHash)
-            || value.sourceId !== undefined && (typeof value.sourceId !== 'string' || !/^prompt:chatHistory-[0-9]{1,9}$/.test(value.sourceId))) return null;
+            || value.sourceId !== undefined && (typeof value.sourceId !== 'string'
+                || value.sourceId !== 'slot:chatHistory' && !/^prompt:chatHistory-[0-9]{1,9}$/.test(value.sourceId))) return null;
         const message = messages[value.messageIndex];
-        if (!['user', 'assistant'].includes(message?.role)) return null;
+        if (!['user', 'assistant', 'system'].includes(message?.role)) return null;
         if (typeof message.content === 'string' ? value.textPartIndex !== null
             : !Array.isArray(message.content) || !integer(value.textPartIndex, message.content.length - 1)) return null;
         const text = textAt(message, value.textPartIndex);
@@ -132,4 +136,9 @@ function sanitizeCacheBoundaryEvidence(value, body) {
         block: value.block, part: value.part, stableTextChars: value.stableTextChars };
 }
 
-module.exports = { BOUNDARY_FIELD, EVIDENCE_FIELD, validateCacheBoundary, prepareCacheBoundary, resolveCacheBoundary, sanitizeCacheBoundaryEvidence };
+function sanitizeCacheBoundaryStatus(value) {
+    return value?.version === 1 && BOUNDARY_STATUSES.has(value.status) ? { version: 1, status: value.status } : undefined;
+}
+
+module.exports = { BOUNDARY_FIELD, EVIDENCE_FIELD, STATUS_FIELD, validateCacheBoundary, prepareCacheBoundary, resolveCacheBoundary,
+    sanitizeCacheBoundaryEvidence, sanitizeCacheBoundaryStatus };

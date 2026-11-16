@@ -26,6 +26,8 @@ cd SillyTavern && ((Get-Content config.yaml -Encoding utf8) -replace 'enableServ
 
 Google 认证沿用酒馆现有设置。缓存命中以 Google 返回用量为准，费用为估算。
 
+最终请求与分段核验记录保存在用户数据目录，滚动保留最近 30 份；可在前端日志中选择、复制和清除。
+
 修改后端后需重启酒馆才能生效。
 
 基于 [Mana Nekoha 的 ST-Vertex-PayGo-Server](https://github.com/mananekoha114/ST-Vertex-PayGo-Server) 修改，采用 [MPL-2.0](LICENSE)。第三方依赖声明见 [vendor/THIRD_PARTY_NOTICES.txt](vendor/THIRD_PARTY_NOTICES.txt)。

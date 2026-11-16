@@ -1,16 +1,19 @@
-/* Bounded, opt-in final outbound evidence. Process memory only; never logs/disk.
+/* Bounded final outbound evidence with per-user rolling request history.
  * SPDX-License-Identifier: MPL-2.0. */
 'use strict';
 const { randomUUID, createHash } = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const { PluginError } = require('./errors.cjs');
 const { validateChatId } = require('./protocol.cjs');
+const { PromptInspectorArchive, HISTORY_LIMIT } = require('./prompt-inspector-archive.cjs');
 const PROMPT_INSPECTOR_WIRE_HOOK = Symbol.for('vertex-paygo.prompt-inspector.wire.v1');
 const PROMPT_INSPECTOR_WIRE_CAPABILITY = Symbol.for('vertex-paygo.prompt-inspector.wire-capability.v1');
 const FIELD = '__vertexPayGoPromptInspector';
 const SOURCES = new Set(['vertexai', 'makersuite', 'custom', 'openai', 'claude']);
 const NATIVE = new Set(['custom', 'openai', 'claude']);
 const GOOGLE = new Set(['vertexai', 'makersuite']);
+const BOUNDARY_STATUSES = new Set(['waiting', 'disabled', 'source-unavailable', 'source-ready', 'ambiguous', 'unsupported',
+    'bound', 'unavailable', 'submitted', 'split', 'already-separated']);
 const KINDS = new Set(['preset', 'character', 'persona', 'worldinfo-blue', 'worldinfo-green', 'worldinfo-depth', 'worldinfo-other', 'author-note', 'memory', 'extension', 'history', 'input', 'unknown']);
 const ERROR_CODES = new Set(['NATIVE_SEND_FAILED', 'NATIVE_FETCH_FAILED', 'NATIVE_GENERATION_FAILED', 'UPSTREAM_HTTP_ERROR', 'OUTBOUND_REQUEST_FAILED', 'FINAL_SCOPE_MISMATCH', 'RAW_BODY_UNAVAILABLE', 'INVALID_UTF8', 'BODY_TOO_LARGE', 'INSPECTOR_CAPACITY', 'CLIENT_DISCONNECTED', 'VERTEX_UPSTREAM_FAILED', 'VERTEX_UPSTREAM_TIMEOUT', 'VERTEX_REDIRECT_REJECTED', 'PROXY_REQUEST_STREAM_FAILED', 'UPSTREAM_RESPONSE_STREAM_FAILED', 'REQUEST_BODY_TOO_LARGE', 'INVALID_GOOGLE_BODY', 'PREPARE_FAILED', 'GEMINI4_UPSTREAM_HTTP_ERROR', 'GEMINI4_UPSTREAM_ERROR', 'GEMINI4_INCOMPLETE_RESPONSE', 'GEMINI4_RESPONSE_TOO_LARGE', 'GEMINI4_CONTINUATION_LIMIT', 'GEMINI4_CONTINUATION_LOOP']);
 function safeError(code, fallback = 'OUTBOUND_REQUEST_FAILED') {
@@ -109,6 +112,9 @@ function metadataSafe(input) {
     if (typeof stream === 'boolean') result.stream = stream;
     if (Number.isSafeInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) result.httpStatus = httpStatus;
     if (Number.isSafeInteger(bodyBytes) && bodyBytes >= 0) result.bodyBytes = bodyBytes;
+    const boundaryStatus = get('cacheBoundaryStatus'), stableChars = get('cacheBoundaryStableTextChars');
+    if (BOUNDARY_STATUSES.has(boundaryStatus)) result.cacheBoundaryStatus = boundaryStatus;
+    if (Number.isSafeInteger(stableChars) && stableChars >= 0 && stableChars <= 2 * 1024 * 1024) result.cacheBoundaryStableTextChars = stableChars;
     return result;
 }
 function finalStage(raw, source, limit) {
@@ -130,16 +136,48 @@ function finalStage(raw, source, limit) {
 class PromptInspectorStore {
     constructor({ now = Date.now, ttlMs = 300_000, maxEntries = 128, maxEntriesPerOwner = 16, maxBodyBytes = 2 * 1024 * 1024,
         maxTraceBytes = 1024 * 1024, maxTotalBytes = 16 * 1024 * 1024, maxTombstones = 128, idFactory = randomUUID,
-        getCapability = () => false } = {}) {
+        getCapability = () => false, maxHistoryEntries = HISTORY_LIMIT } = {}) {
         for (const n of [ttlMs, maxEntries, maxEntriesPerOwner, maxBodyBytes, maxTraceBytes, maxTotalBytes, maxTombstones]) if (!Number.isSafeInteger(n) || n < 1) throw new TypeError('Invalid prompt inspector limits.');
-        Object.assign(this, { now, ttlMs, maxEntries, maxEntriesPerOwner, maxBodyBytes, maxTraceBytes, maxTotalBytes, maxTombstones, idFactory, getCapability });
+        if (!Number.isSafeInteger(maxHistoryEntries) || maxHistoryEntries < 1 || maxHistoryEntries > HISTORY_LIMIT) throw new TypeError('Invalid request history limit.');
+        Object.assign(this, { now, ttlMs, maxEntries, maxEntriesPerOwner, maxBodyBytes, maxTraceBytes, maxTotalBytes, maxTombstones, idFactory, getCapability, maxHistoryEntries });
         this.entries = new Map(); this.latest = new Map(); this.tombstones = new Map(); this.sequence = 0; this.usedBytes = 0; this.bufferedBytes = 0; this.closed = false;
+        this.archives = new Map();
         this.requests = new WeakMap(); this.references = new WeakMap(); this.dispatches = new WeakMap();
         this.hook = Object.freeze({ claim: request => this.quiet(() => this.claim(request)), beforeSend: (request, raw, meta) => this.quiet(() => this.beforeSend(request, raw, meta)),
             sent: (request, raw, meta) => this.quiet(() => this.sent(request, raw, meta)), failed: (request, code) => this.quiet(() => this.failed(request, code)) });
         this.timer = setInterval(() => this.quiet(() => this.sweep()), Math.min(ttlMs, 10_000)); this.timer.unref?.();
     }
     quiet(fn) { try { return fn(); } catch { return null; } }
+    archiveFor(request, owned = owner(request)) {
+        if (!owned) return null;
+        let archive = this.archives.get(owned);
+        if (!archive) {
+            archive = new PromptInspectorArchive({ rootDir: request.user.directories.root, owner: owned,
+                maxEntries: this.maxHistoryEntries, maxRecordBytes: this.maxBodyBytes * 3 + this.maxTraceBytes + 64 * 1024 });
+            this.archives.set(owned, archive);
+            while (this.archives.size > 64) this.archives.delete(this.archives.keys().next().value);
+        }
+        return archive;
+    }
+    persist(entry) {
+        if (!entry?.archive || !entry.record?.sequence) return false;
+        try {
+            delete entry.record.metadata.archiveError;
+            entry.record.metadata.archiveStatus = 'saved';
+            if (!entry.archive.save(entry.record)) throw new Error('Request history unavailable.');
+            return true;
+        } catch { entry.record.metadata.archiveStatus = 'failed'; entry.record.metadata.archiveError = 'ARCHIVE_WRITE_FAILED'; return false; }
+    }
+    makeRoom(bytes = 0, owned = null, exclude = null) {
+        const over = () => this.entries.size >= this.maxEntries
+            || owned && [...this.entries.values()].filter(entry => entry.owner === owned).length >= this.maxEntriesPerOwner
+            || this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes;
+        for (const [id, entry] of this.entries) {
+            if (!over()) break;
+            if (id !== exclude && entry.record?.sequence > 0 && !entry.busy && !entry.cleanups.size) this.drop(id, 'archived');
+        }
+        return !over();
+    }
     capabilities() {
         const available = !this.closed;
         const nativeRelay = available && this.quiet(() => this.getCapability()) === true;
@@ -150,14 +188,15 @@ class PromptInspectorStore {
             requiresHostPatch: false,
             pluginWireSources,
             supportedSources: [...pluginWireSources],
-            sourceTrace: 'frontend-supplied', privacyMode: 'memory-only',
+            sourceTrace: 'frontend-supplied', privacyMode: 'user-data',
             limits: { ttlMs: this.ttlMs, maxBodyBytes: this.maxBodyBytes, maxTraceBytes: this.maxTraceBytes,
-                maxTotalBytes: this.maxTotalBytes, maxEntries: this.maxEntries, maxEntriesPerOwner: this.maxEntriesPerOwner } };
+                maxTotalBytes: this.maxTotalBytes, maxEntries: this.maxEntries, maxEntriesPerOwner: this.maxEntriesPerOwner,
+                maxHistoryEntries: this.maxHistoryEntries } };
     }
     scope(entry) { return JSON.stringify([entry.owner, entry.chatId, entry.source, entry.model]); }
     sweep() {
         const now = this.now();
-        for (const [id, entry] of this.entries) if (now >= entry.expires) this.drop(id, 'expired');
+        for (const [id, entry] of this.entries) if (entry.record?.sequence === 0 && now >= entry.expires) this.drop(id, 'expired');
         for (const [id, tombstone] of this.tombstones) if (now >= tombstone.until) this.tombstones.delete(id);
     }
     drop(id, status = 'unknown') {
@@ -168,6 +207,7 @@ class PromptInspectorStore {
         entry.cleanups.clear();
         this.usedBytes -= entry.bytes;
         const sequence = entry.record?.sequence ?? 0;
+        if (status !== 'cleared') this.persist(entry);
         // In-flight references contain only IDs. Also wipe the entry for any external reference.
         entry.record = null; entry.bytes = 0;
         this.tombstones.set(id, { owner: entry.owner, chatId: entry.chatId, source: entry.source, model: entry.model, sequence, status, until: this.now() + this.ttlMs });
@@ -184,9 +224,11 @@ class PromptInspectorStore {
                 '当前服务商不支持捕获最终出站请求，可查看前端组装的消息。');
         }
         const chatId = validateChatId(data.chatId), model = modelId(data.model);
+        this.makeRoom(0, owned);
         if (this.entries.size >= this.maxEntries || [...this.entries.values()].filter(e => e.owner === owned).length >= this.maxEntriesPerOwner) throw new PluginError(429, 'PROMPT_INSPECTOR_CAPACITY', '提示词临时记录已达到容量上限，请清理记录后重试。');
         let { trace, traceError } = normalizeTrace(data.trace, this.maxTraceBytes);
         let bytes = Buffer.byteLength(JSON.stringify(trace)) + 1024;
+        this.makeRoom(bytes, owned);
         if (this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) { trace = { ...emptyTrace(), reason: 'TRACE_LIMIT' }; traceError = 'TRACE_CAPACITY'; bytes = Buffer.byteLength(JSON.stringify(trace)) + 1024; }
         if (this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) throw new PluginError(429, 'PROMPT_INSPECTOR_CAPACITY', '提示词临时记录已达到容量上限，请清理记录后重试。');
         const ticket = this.idFactory();
@@ -194,7 +236,9 @@ class PromptInspectorStore {
         const expires = this.now() + this.ttlMs;
         const record = { version: 1, id: ticket, chatId, source: data.source, model, sequence: 0, capturedAt: new Date(this.now()).toISOString(),
             state: 'pending', complete: false, rawRequest: null, trace, metadata: traceError ? { traceError } : {} };
-        this.entries.set(ticket, { owner: owned, chatId, source: data.source, model, expires, bytes, record, bound: false, cleanups: new Set() });
+        const archive = this.archiveFor(request, owned);
+        this.sequence = Math.max(this.sequence, this.quiet(() => archive.maxSequence()) ?? 0);
+        this.entries.set(ticket, { owner: owned, chatId, source: data.source, model, expires, bytes, record, archive, busy: false, bound: false, cleanups: new Set() });
         this.usedBytes += bytes;
         return { version: 1, ticket, expiresAt: new Date(expires).toISOString() };
     }
@@ -206,19 +250,44 @@ class PromptInspectorStore {
         if (query.chatId !== undefined) validateChatId(query.chatId);
         if (query.source !== undefined && !SOURCES.has(query.source)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '请求来源无效。');
         if (query.model !== undefined) modelId(query.model);
-        if (query.ticket === undefined && query.chatId === undefined) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '请求必须包含查看凭证或对话 ID。');
+        const history = query.history === true || query.history === 'true';
+        const pendingOnly = query.pendingOnly === true || query.pendingOnly === 'true';
+        if (query.history !== undefined && ![true, false, 'true', 'false'].includes(query.history)
+            || query.pendingOnly !== undefined && ![true, false, 'true', 'false'].includes(query.pendingOnly)) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '提示词记录筛选无效。');
+        if (query.ticket === undefined && query.chatId === undefined && !history) throw new PluginError(400, 'INVALID_PROMPT_INSPECTOR_QUERY', '请求必须包含查看凭证或对话 ID。');
+        const archive = this.archiveFor(request, owned);
         let selected;
         if (query.ticket !== undefined) {
-            const e = this.entries.get(query.ticket);
-            if (e?.owner === owned && this.matchQuery(e, query)) selected = [query.ticket, e];
+            for (const [id, e] of this.entries) if ((id === query.ticket || e.record?.id === query.ticket)
+                && e.owner === owned && this.matchQuery(e, query)) { selected = [id, e]; break; }
         } else {
             for (const [id, e] of this.entries) if (e.owner === owned && this.matchQuery(e, query) && e.record.sequence > 0 && (!selected || e.record.sequence > selected[1].record.sequence)) selected = [id, e];
         }
         if (remove) {
-            for (const [id, e] of this.entries) if (e.owner === owned && this.matchQuery(e, query) && (query.ticket === undefined || query.ticket === id)) this.drop(id, 'cleared');
+            const deletedRecordIds = [];
+            for (const [id, e] of this.entries) if (e.owner === owned && this.matchQuery(e, query)
+                && (query.ticket === undefined || query.ticket === id || query.ticket === e.record?.id)
+                && (!pendingOnly || e.record?.sequence === 0)) { deletedRecordIds.push(e.record?.id); this.drop(id, 'cleared'); }
+            if (!pendingOnly) {
+                archive.remove(query);
+                for (const id of deletedRecordIds) if (id && id !== query.ticket) archive.remove({ ticket: id });
+            }
             return { version: 1, snapshot: null, status: 'cleared' };
         }
-        if (selected) return { version: 1, snapshot: structuredClone(selected[1].record), status: selected[1].record.state };
+        if (history) {
+            const records = new Map(archive.list(query).map(record => [record.id, record]));
+            for (const [id, e] of this.entries) if (e.owner === owned && this.matchQuery(e, query) && e.record.sequence > 0
+                && (query.ticket === undefined || query.ticket === id || query.ticket === e.record.id)) {
+                const record = e.record;
+                records.set(record.id, Object.fromEntries(['id', 'chatId', 'source', 'model', 'sequence', 'state', 'complete',
+                    'capturedAt', 'dispatchAt', 'responseAt', 'errorCode', 'metadata'].filter(key => record[key] !== undefined)
+                    .map(key => [key, structuredClone(record[key])])));
+            }
+            return { version: 1, status: 'history', history: [...records.values()].sort((a, b) => b.sequence - a.sequence).slice(0, this.maxHistoryEntries), limit: this.maxHistoryEntries };
+        }
+        const archived = archive.read(query);
+        if (selected && (!archived || selected[1].record.sequence >= archived.sequence)) return { version: 1, snapshot: structuredClone(selected[1].record), status: selected[1].record.state };
+        if (archived) return { version: 1, snapshot: archived, status: archived.state };
         let t = this.tombstones.get(query.ticket);
         if (query.ticket === undefined) for (const candidate of this.tombstones.values()) if (candidate.owner === owned && this.matchQuery(candidate, query) && candidate.sequence > 0 && (!t || candidate.sequence > t.sequence)) t = candidate;
         return { version: 1, snapshot: null, status: t?.owner === owned && this.matchQuery(t, query) ? t.status : 'unknown' };
@@ -270,7 +339,15 @@ class PromptInspectorStore {
             // sent() observes fetch headers; a later response stream failure is
             // still real failure, but can never restamp or resurrect evidence.
             const entry = claim.handle ? this.active(claim.handle) : null;
-            if (entry?.record.state === 'responded') { entry.record.state = 'failed'; entry.record.errorCode = safeError(code, 'NATIVE_SEND_FAILED'); entry.record.responseAt = new Date(this.now()).toISOString(); }
+            if (entry?.record.state === 'responded') { entry.record.state = 'failed'; entry.record.errorCode = safeError(code, 'NATIVE_SEND_FAILED'); entry.record.responseAt = new Date(this.now()).toISOString(); this.persist(entry); }
+            else if (!entry && !this.closed && claim.handle) {
+                const dispatch = this.dispatches.get(claim.handle);
+                const saved = dispatch?.archive ? this.quiet(() => dispatch.archive.read({ ticket: dispatch.recordId })) : null;
+                if (saved?.state === 'responded' && saved.sequence === dispatch.sequence) {
+                    saved.state = 'failed'; saved.errorCode = safeError(code, 'NATIVE_SEND_FAILED'); saved.responseAt = new Date(this.now()).toISOString();
+                    this.quiet(() => dispatch.archive.save(saved));
+                }
+            }
             return null;
         }
         claim.terminal = true;
@@ -296,19 +373,24 @@ class PromptInspectorStore {
     beginGoogleDispatch(reference, metadata) { return this.quiet(() => {
         this.sweep(); const context = this.references.get(reference), entry = this.entries.get(context?.id);
         if (this.closed || !entry || entry.owner !== context.owner) return null;
-        // One raw record per exact owner/profile/root/chat/source/model scope.
+        // Tickets remain request-bound; each actual dispatch gets a distinct
+        // persisted ID so a continuation cannot overwrite an earlier body.
         const previous = this.latest.get(this.scope(entry));
-        if (previous && previous !== context.id) this.drop(previous, 'superseded');
+        const previousEntry = this.entries.get(previous);
+        if (previous && previous !== context.id && !previousEntry?.busy) this.drop(previous, 'archived');
         for (const cleanup of entry.cleanups) this.quiet(cleanup); entry.cleanups.clear();
         const record = entry.record;
+        this.persist(entry);
         this.usedBytes -= entry.bytes;
         record.rawRequest = null; record.complete = false;
         record.trace.stages = record.trace.stages.filter(stage => stage.id !== 'backend-final');
-        record.sequence = ++this.sequence; record.capturedAt = new Date(this.now()).toISOString(); record.state = 'dispatched'; delete record.responseAt; delete record.errorCode;
+        record.id = randomUUID(); record.sequence = ++this.sequence; record.capturedAt = new Date(this.now()).toISOString(); record.state = 'dispatched'; delete record.responseAt; delete record.errorCode;
         record.metadata = { ...(record.metadata.traceError ? { traceError: record.metadata.traceError } : {}), ...metadataSafe(metadata) };
         entry.bytes = Buffer.byteLength(JSON.stringify(record.trace)) + 1024; this.usedBytes += entry.bytes;
+        entry.busy = true; entry.expires = Infinity;
         this.latest.set(this.scope(entry), context.id);
-        const handle = Object.freeze({}); this.dispatches.set(handle, { ...context, sequence: record.sequence, captured: false, terminal: false }); return handle;
+        const handle = Object.freeze({}); this.dispatches.set(handle, { ...context, sequence: record.sequence, recordId: record.id,
+            archive: entry.archive, captured: false, terminal: false }); return handle;
     }); }
     captureGoogleBody(handle, rawBody, info, metadata) { return this.quiet(() => {
         const entry = this.active(handle), context = this.dispatches.get(handle);
@@ -319,14 +401,14 @@ class PromptInspectorStore {
         const size = typeof rawBody === 'string' ? Buffer.byteLength(rawBody) : Buffer.isBuffer(rawBody) || rawBody instanceof Uint8Array ? rawBody.byteLength : info?.bodyBytes;
         Object.assign(record.metadata, metadataSafe({ bodyBytes: size }));
         if ((Number.isSafeInteger(size) && size > this.maxBodyBytes) || info?.reason === 'BODY_TOO_LARGE' || info?.reason === 'INSPECTOR_CAPACITY') {
-            record.state = 'oversize'; record.errorCode = info?.reason === 'INSPECTOR_CAPACITY' ? 'INSPECTOR_CAPACITY' : 'BODY_TOO_LARGE'; return;
+            record.state = 'oversize'; record.errorCode = info?.reason === 'INSPECTOR_CAPACITY' ? 'INSPECTOR_CAPACITY' : 'BODY_TOO_LARGE'; this.persist(entry); return;
         }
         let raw;
         try {
             if (typeof rawBody === 'string') { if (Buffer.from(rawBody).toString('utf8') !== rawBody) throw new Error(); raw = rawBody; }
             else if (Buffer.isBuffer(rawBody) || rawBody instanceof Uint8Array) raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(rawBody);
-            else { record.state = 'failed'; record.errorCode = 'RAW_BODY_UNAVAILABLE'; return; }
-        } catch { record.state = 'failed'; record.errorCode = 'INVALID_UTF8'; return; }
+            else { record.state = 'failed'; record.errorCode = 'RAW_BODY_UNAVAILABLE'; this.persist(entry); return; }
+        } catch { record.state = 'failed'; record.errorCode = 'INVALID_UTF8'; this.persist(entry); return; }
         // Scope is bound to the selected original request model. Native aliasing/
         // transforms may legitimately change the final model; never scope-shift it.
         try {
@@ -340,12 +422,14 @@ class PromptInspectorStore {
             stage = { id: 'backend-final', label: 'Final outbound request', messages: [], notes: ['无法解析请求结构，最终请求的原始内容已保存在 rawRequest 中。'] };
         }
         const stageBytes = stage ? Buffer.byteLength(JSON.stringify(stage)) : 0;
+        this.makeRoom(size + stageBytes, null, context.id);
         if (this.usedBytes + this.bufferedBytes + size + stageBytes > this.maxTotalBytes) {
-            record.state = 'oversize'; record.errorCode = 'INSPECTOR_CAPACITY'; return;
+            record.state = 'oversize'; record.errorCode = 'INSPECTOR_CAPACITY'; this.persist(entry); return;
         }
         record.rawRequest = raw; record.complete = true;
         if (stage) record.trace.stages.push(stage);
         entry.bytes += size + stageBytes; this.usedBytes += size + stageBytes;
+        this.persist(entry);
         return true;
     }); }
     failGoogleTicket(reference, errorCode = 'PREPARE_FAILED') { return this.quiet(() => {
@@ -357,21 +441,25 @@ class PromptInspectorStore {
         const entry = this.active(handle), context = this.dispatches.get(handle);
         if (!entry || context.terminal) return null;
         context.terminal = true; const record = entry.record;
+        entry.busy = false; entry.expires = this.now() + this.ttlMs;
         const safeMeta = metadataSafe(metadata);
         Object.assign(record.metadata, safeMeta); record.responseAt = new Date(this.now()).toISOString();
         if (!errorCode && safeMeta.httpStatus >= 400) errorCode = `UPSTREAM_HTTP_${safeMeta.httpStatus}`;
         // Oversize/capture failure remains explicit even if generation succeeds.
-        if (record.state === 'oversize' || record.state === 'failed') return;
+        if (record.state === 'oversize' || record.state === 'failed') { this.persist(entry); return; }
         if (errorCode) { record.state = 'failed'; record.errorCode = safeError(errorCode); }
         else if (!record.complete) { record.state = 'failed'; record.errorCode = 'RAW_BODY_UNAVAILABLE'; }
         else record.state = 'responded';
+        this.persist(entry);
     }); }
     registerGoogleCapture(handle, cleanup) {
         const entry = this.active(handle); if (!entry || typeof cleanup !== 'function' || entry.cleanups.size > 0) return null;
         entry.cleanups.add(cleanup); return () => entry.cleanups.delete(cleanup);
     }
     reserveCaptureBytes(handle, bytes) {
-        if (!Number.isSafeInteger(bytes) || bytes < 0 || !this.active(handle) || this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) return false;
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || !this.active(handle)) return false;
+        this.makeRoom(bytes, null, this.dispatches.get(handle)?.id);
+        if (this.usedBytes + this.bufferedBytes + bytes > this.maxTotalBytes) return false;
         this.bufferedBytes += bytes; return true;
     }
     releaseCaptureBytes(bytes) { if (Number.isSafeInteger(bytes) && bytes >= 0) this.bufferedBytes = Math.max(0, this.bufferedBytes - bytes); }

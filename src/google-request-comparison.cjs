@@ -76,11 +76,10 @@ function confirmedWorldInfoSource(bytes, firstDifference, plan) {
 }
 
 class GoogleRequestComparisonStore {
-    constructor({ now = Date.now, ttlMs = 300_000, maxEntries = 16, maxBytes = 8 * 1024 * 1024 } = {}) {
+    constructor({ now = Date.now, ttlMs = 300_000, maxEntries = 30, maxBytes = 60 * 1024 * 1024 } = {}) {
         for (const value of [ttlMs, maxEntries, maxBytes]) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Invalid comparison limits');
-        Object.assign(this, { now, ttlMs, maxEntries, maxBytes });
+        Object.assign(this, { now, ttlMs, maxEntries: Math.min(30, maxEntries), maxBytes });
         this.entries = new Map(); this.bytes = 0; this.closed = false;
-        this.timer = setInterval(() => this.sweep(), Math.min(ttlMs, 10_000)); this.timer.unref?.();
     }
     drop(id) {
         const entry = this.entries.get(id);
@@ -89,7 +88,7 @@ class GoogleRequestComparisonStore {
         // Wipe this owned copy before releasing it; callers' transport buffers are untouched.
         entry.bytes.fill(0); this.entries.delete(id);
     }
-    sweep() { for (const [id, entry] of this.entries) if (this.now() >= entry.expires) this.drop(id); }
+    sweep() { /* Completed request comparisons roll by count and bytes, not elapsed time. */ }
     capture({ scope, id, bytes, isComplete = () => true, worldInfoOrder } = {}) {
         if (this.closed) return null;
         this.sweep();
@@ -105,7 +104,7 @@ class GoogleRequestComparisonStore {
         this.drop(id);
         while (this.entries.size >= this.maxEntries || this.bytes + bytes.length > this.maxBytes) this.drop(this.entries.keys().next().value);
         const copy = Buffer.from(bytes);
-        this.entries.set(id, { scope, id, bytes: copy, expires: this.now() + this.ttlMs }); this.bytes += copy.length;
+        this.entries.set(id, { scope, id, bytes: copy }); this.bytes += copy.length;
         return comparison;
     }
     close() { this.closed = true; clearInterval(this.timer); for (const id of [...this.entries.keys()]) this.drop(id); }

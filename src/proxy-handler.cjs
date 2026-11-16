@@ -288,7 +288,8 @@ function createProxyHandler({
                     onRequest: (bytes, info) => {
                         // Each Gemini4 continuation is a separate final dispatch.
                         finishInspection(undefined, { httpStatus: 200 });
-                        inspectorDispatch = beginInspection({ transport: 'google-gemini4', tier: ticketData.tier, region: ticketData.region, stream: ticketData.stream });
+                        inspectorDispatch = beginInspection({ transport: 'google-gemini4', tier: ticketData.tier, region: ticketData.region, stream: ticketData.stream,
+                            cacheBoundaryStatus: info?.cacheBoundaryStatus, cacheBoundaryStableTextChars: info?.cacheBoundaryStableTextChars });
                         try { promptInspectorStore?.captureGoogleBody(inspectorDispatch, bytes); } catch {}
                         try { usageStore?.captureGoogleRequest?.(usageReference, bytes, info, ticketData.worldInfoOrder); }
                         catch { logStore?.server('warn', 'request_preview_capture_failed', makeLogContext(), { priority: 'low' }); }

@@ -4,7 +4,7 @@ const { StringDecoder } = require('node:string_decoder');
 const { PluginError, asPluginError, errorPayload } = require('./errors.cjs');
 const { sanitizeUsage, mergeUsage, finalizeGoogleUsage } = require('./usage-capture.cjs');
 const { applyBillingLabels } = require('./billing-labels.cjs');
-const { BOUNDARY_FIELD, EVIDENCE_FIELD, sanitizeCacheBoundaryEvidence } = require('./cache-prefix-boundary.cjs');
+const { BOUNDARY_FIELD, EVIDENCE_FIELD, STATUS_FIELD, sanitizeCacheBoundaryEvidence, sanitizeCacheBoundaryStatus } = require('./cache-prefix-boundary.cjs');
 const { validatePreparedGoogleTarget } = require('./target-policy.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
 const { MAX_GOOGLE_ERROR_BYTES, googleErrorDetails, parseGoogleError } = require('./google-errors.cjs');
@@ -114,8 +114,11 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
         try { original = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。'); }
         if (!original || typeof original !== 'object' || Array.isArray(original)) throw new PluginError(400, 'INVALID_GOOGLE_BODY', 'Google 请求内容必须是 JSON 对象。');
         const cacheBoundary = sanitizeCacheBoundaryEvidence(original[EVIDENCE_FIELD], original);
+        const boundaryAttempt = sanitizeCacheBoundaryStatus(original[STATUS_FIELD]);
+        const cacheBoundaryStatus = cacheBoundary?.status ?? (boundaryAttempt?.status === 'bound' ? 'unavailable' : boundaryAttempt?.status);
         delete original[EVIDENCE_FIELD];
         delete original[BOUNDARY_FIELD];
+        delete original[STATUS_FIELD];
         applyBillingLabels(original, ticketData.billingLabels);
         const config = { ...(original.generationConfig || {}) };
         for (const key of ['temperature', 'topP', 'topK', 'candidateCount', 'presencePenalty', 'frequencyPenalty']) delete config[key];
@@ -143,7 +146,8 @@ async function runGemini4Transport({ request, response, ticketData, target, upst
                 active = upstreamRequest(upstreamTarget, { method: 'POST', headers }, resolve);
                 active.once('error', reject);
                 active.setTimeout?.(upstreamTimeoutMs, () => active.destroy(new PluginError(504, 'VERTEX_UPSTREAM_TIMEOUT', 'Google 上游请求超时，请稍后重试或检查网络与代理连接。')));
-                try { onRequest(bytes, cacheBoundary ? { cacheBoundary } : {}); } catch { /* Diagnostics cannot block generation. */ }
+                try { onRequest(bytes, { ...(cacheBoundary ? { cacheBoundary, cacheBoundaryStableTextChars: cacheBoundary.stableTextChars } : {}),
+                    ...(cacheBoundaryStatus ? { cacheBoundaryStatus } : {}) }); } catch { /* Diagnostics cannot block generation. */ }
                 active.end(bytes);
             });
             activeIncoming = upstreamResponse;

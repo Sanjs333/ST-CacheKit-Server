@@ -8,7 +8,7 @@ const { PluginError, asPluginError, errorPayload } = require('./errors.cjs');
 const { writeResponse } = require('./gemini4-transport.cjs');
 const { isGemini4Model } = require('./gemini4-models.cjs');
 const { sanitizeUsage, mergeUsage } = require('./usage-capture.cjs');
-const { BOUNDARY_FIELD, EVIDENCE_FIELD, prepareCacheBoundary, resolveCacheBoundary } = require('./cache-prefix-boundary.cjs');
+const { BOUNDARY_FIELD, EVIDENCE_FIELD, STATUS_FIELD, prepareCacheBoundary, resolveCacheBoundary, sanitizeCacheBoundaryStatus } = require('./cache-prefix-boundary.cjs');
 
 // Match the host's console body logs without exposing private transport metadata.
 // These logs deliberately do not go through the body-free diagnostic LogStore.
@@ -183,6 +183,8 @@ async function buildNativeGeminiBody(input, runtime) {
     // Private body-free receipt for our loopback transport. It strips this
     // field before serializing any Google request or continuation.
     if (boundaryEvidence) body[EVIDENCE_FIELD] = boundaryEvidence;
+    const boundaryStatus = sanitizeCacheBoundaryStatus(input[STATUS_FIELD]);
+    if (boundaryStatus) body[STATUS_FIELD] = boundaryStatus;
     const declarations = [], custom = [];
     for (const tool of structuredClone(input.tools ?? [])) {
         if (tool.type === 'function' && tool.function) {
