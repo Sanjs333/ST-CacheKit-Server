@@ -28,6 +28,8 @@ Google 认证沿用酒馆现有设置。缓存命中以 Google 返回用量为�
 
 最终请求与分段核验记录保存在用户数据目录，滚动保留最近 30 份；可在前端日志中选择、复制和清除。
 
+SillyTavern 1.19 的 Custom 绑定凭证在准备中转时由核心按原 API 根地址校验并读取；临时回环请求使用独立认证，上游密钥仅保存在本次中转票据中。需要同步更新前端扩展。旧 Custom 配置仍使用原密钥选择，无密钥连接不会读取其他活动密钥。
+
 修改后端后需重启酒馆才能生效。
 
 基于 [Mana Nekoha 的 ST-Vertex-PayGo-Server](https://github.com/mananekoha114/ST-Vertex-PayGo-Server) 修改，采用 [MPL-2.0](LICENSE)。第三方依赖声明见 [vendor/THIRD_PARTY_NOTICES.txt](vendor/THIRD_PARTY_NOTICES.txt)。

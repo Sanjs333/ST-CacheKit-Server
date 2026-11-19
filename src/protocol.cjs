@@ -13,7 +13,7 @@ const { isGemini4Model } = require('./gemini4-models.cjs');
 
 const PROTOCOL_VERSION = 2;
 const PLUGIN_ID = 'vertex-paygo';
-const PLUGIN_VERSION = '1.1.3';
+const PLUGIN_VERSION = '1.1.4';
 const COMPATIBLE_ST_RANGE = '>=1.14.0';
 const TIERS = Object.freeze(['standard', 'flex']);
 const AUTH_MODES = Object.freeze(['express', 'full']);

@@ -49,7 +49,7 @@ function isSupportedHost(packageData) {
     return false;
 }
 
-function createNativeAuthorizationReader({ readHostSecret, secretKeys, legacySecretSelection = false }) {
+function createNativeAuthorizationReader({ readHostSecret, secretKeys, legacySecretSelection = false, resolveCustomAuth }) {
     return function getNativeAuthorization(request, config) {
         const source = config?.source;
         const keys = { openai: secretKeys.OPENAI, claude: secretKeys.CLAUDE, custom: secretKeys.CUSTOM };
@@ -57,6 +57,18 @@ function createNativeAuthorizationReader({ readHostSecret, secretKeys, legacySec
             '当前配置无法捕获原生接口的最终请求。', { details: { reason } }); };
         if (!Object.hasOwn(keys, source) || !keys[source]) unsupported('HOST_SECRET_SOURCE_UNAVAILABLE');
         if (!request?.user?.directories) unsupported('CREDENTIAL_UNAVAILABLE');
+        if (source === 'custom' && config.custom_auth !== undefined) {
+            if (typeof resolveCustomAuth !== 'function') unsupported('HOST_CUSTOM_AUTH_UNAVAILABLE');
+            // Resolve the original envelope against the original root, using the
+            // core's exact endpoint and per-account vault validation unchanged.
+            let resolved;
+            try { resolved = resolveCustomAuth(request.user.directories, config, config.custom_url); }
+            catch { unsupported('CUSTOM_AUTH_REJECTED'); }
+            if (!resolved || typeof resolved.endpoint !== 'string' || !resolved.headers) unsupported('CUSTOM_AUTH_REJECTED');
+            const headers = { ...resolved.headers };
+            if (Object.values(headers).some(value => typeof value !== 'string' || /[\x00-\x1f\x7f]/u.test(value))) unsupported('INVALID_CREDENTIAL');
+            return Object.freeze({ endpoint: resolved.endpoint, headers: Object.freeze(headers) });
+        }
         const usesProxy = source !== 'custom' && Boolean(config.reverse_proxy);
         // Older native handlers ignore secret_id. Taking the explicitly selected
         // key here would change the credential used by an unmodified host.
@@ -115,8 +127,13 @@ async function loadStRuntime({
 
     const legacySecretSelection = packageData.name === 'sillytavern' && !isAtLeastVersion(packageData.version, [1, 16, 0]);
     const readHostSecret = createHostSecretReader({ secretsModule, legacy: legacySecretSelection });
+    let resolveCustomAuth;
+    try {
+        const customAuthModuleUrl = pathToFileURL(path.join(resolvedRoot, 'src', 'custom-auth.js')).href;
+        ({ resolveCustomAuth } = await importModule(customAuthModuleUrl));
+    } catch { /* Older hosts retain legacy routing; envelopes require the core resolver. */ }
     const getNativeAuthorization = createNativeAuthorizationReader({
-        readHostSecret, secretKeys: secretsModule.SECRET_KEYS, legacySecretSelection,
+        readHostSecret, secretKeys: secretsModule.SECRET_KEYS, legacySecretSelection, resolveCustomAuth,
     });
 
     const getGoogleApiConfig = async (request, model, endpoint) => {

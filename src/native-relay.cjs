@@ -11,7 +11,7 @@ const { PromptInspectorBodyTap } = require('./prompt-inspector-tap.cjs');
 
 const SOURCES = new Set(['openai', 'claude', 'custom']);
 const FIELDS = new Set(['version', 'source', 'model', 'chatId', 'promptInspectorTicket',
-    'reverse_proxy', 'proxy_password', 'secret_id', 'custom_url', 'custom_include_headers', 'custom_api_format']);
+    'reverse_proxy', 'proxy_password', 'secret_id', 'custom_url', 'custom_include_headers', 'custom_api_format', 'custom_auth']);
 const HOP_HEADERS = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
     'te', 'trailer', 'transfer-encoding', 'upgrade']);
 const PRIVATE_HEADERS = new Set(['host', 'authorization', 'x-api-key', 'x-goog-api-key', 'cookie']);
@@ -36,6 +36,16 @@ function validateNativePrepare(body) {
         const descriptor = Object.getOwnPropertyDescriptor(body, key);
         if (!descriptor || !('value' in descriptor)) throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生请求的准备信息无效。');
         const value = descriptor.value;
+        if (key === 'custom_auth') {
+            if (body.source !== 'custom' || !value || typeof value !== 'object' || Array.isArray(value)) {
+                throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生 Custom 凭证信息无效。');
+            }
+            // Keep a request-owned copy across the asynchronous readiness check.
+            const text = JSON.stringify(value);
+            if (Buffer.byteLength(text) > 32_768) throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生 Custom 凭证信息过大。');
+            config[key] = JSON.parse(text);
+            continue;
+        }
         const unsafeText = key === 'custom_include_headers' ? /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u : /[\x00-\x1f\x7f]/u;
         if (key !== 'version' && (typeof value !== 'string' || value.length > 32_768 || unsafeText.test(value))) {
             throw new PluginError(400, 'INVALID_NATIVE_PREPARE', '原生请求的准备信息无效。');
@@ -148,7 +158,8 @@ function createNativeRelay({ ticketStore, promptInspectorStore,
             });
             const target = new URL(data.targetBase + suffix);
             const headers = filteredHeaders(request.headers, true);
-            headers[data.authorization.headerName] = data.authorization.headerValue;
+            Object.assign(headers, data.authorization.headers
+                ?? { [data.authorization.headerName]: data.authorization.headerValue });
             try { if (data.promptInspectorReference) handleRef = promptInspectorStore?.beginGoogleDispatch(data.promptInspectorReference, { transport: 'native-loopback-http' }); } catch {}
             // Node's normal global HTTP/HTTPS agents retain the host's proxy and
             // private-network policy. No agent/fetch/global monkeypatch is used.
@@ -256,11 +267,14 @@ function registerNativeRelayRoutes(router, { stRuntime, nativeTicketStore, nativ
             if (authenticatedOwner(request) !== owned || request.aborted || response.destroyed) throw unsupported('PREPARE_ABORTED');
             try { reference = promptInspectorStore?.bindNativeTicket(request, config); } catch {}
             issued = nativeTicketStore.commit(reservation, { source: config.source, model: config.model,
-                chatId: config.chatId, targetBase, authorization, ...(reference ? { promptInspectorReference: reference } : {}) });
+                chatId: config.chatId, targetBase: authorization.endpoint ?? targetBase, authorization,
+                ...(reference ? { promptInspectorReference: reference } : {}) });
             reservation = undefined;
             const proxyUrl = nativeRelay.baseUrl + '/native-proxy/' + issued.ticket;
             const requestOverrides = config.source === 'custom'
-                ? { custom_url: proxyUrl, custom_include_headers: JSON.stringify({ Authorization: 'Bearer ' + issued.proxySecret }) }
+                ? { custom_url: proxyUrl, custom_include_headers: JSON.stringify({ Authorization: 'Bearer ' + issued.proxySecret }),
+                    ...(config.custom_auth !== undefined ? { custom_auth: { version: 1,
+                        auth: { mode: 'bearer', required: false }, credential: { mode: 'legacy-custom', id: null } } } : {}) }
                 : { reverse_proxy: proxyUrl, proxy_password: issued.proxySecret };
             return response.json({ ok: true, protocolVersion: 2, transport: 'native-loopback-http', source: config.source,
                 ticket: issued.ticket, proxyUrl, proxySecret: issued.proxySecret,
